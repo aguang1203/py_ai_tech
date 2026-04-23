@@ -1,0 +1,16 @@
+# PyTorch (GPU加速版 - CUDA 13.0)
+# 
+# 当前配置:
+# - PyTorch: 2.11.0+cu130
+# - CUDA: 13.0
+# - GPU: NVIDIA RTX 4070 Laptop GPU
+#
+# 如需重新安装或更新，使用以下命令：
+# pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu130
+
+torch>=2.11.0
+torchvision>=0.26.0
+
+# 其他依赖
+numpy>=1.24.0
+matplotlib>=3.7.0
