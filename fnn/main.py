@@ -15,14 +15,12 @@ from torch.utils.data import DataLoader, TensorDataset
 
 # 数据处理（通用，仅用于加载/划分/标准化）
 import numpy as np
-from sklearn.datasets import fetch_california_housing, make_classification
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+# from sklearn.datasets import fetch_california_housing, make_classification
+# from sklearn.model_selection import train_test_split
+# from sklearn.preprocessing import StandardScaler
 
 # 数据可视化
 import matplotlib.pyplot as plt
-
-from cnn_demo import train
 
 #  1-end: 导入必要的库和模块
 
@@ -41,26 +39,26 @@ print("使用设备: ", device)
 # 3-start: 加载数据 + 预处理
 
 # 加载数据
-data = fetch_california_housing()
-x, y = data.data, data.target
+# data = fetch_california_housing()
+# x, y = data.data, data.target
 
 
 # 划分训练集/测试集,将数据集划分为训练集和测试集，测试集占比20%，设置随机种子保证结果可复现
 # 总结：x_train 是"因"，y_train 是"果"，神经网络的任务就是学习这个因果关系。
 # x_train: 特征数据（输入）
 # y_train: 标签数据（输出/目标）
-x_train, x_test, y_train, y_test = train_test_split(
-    x, y, test_size=0.2, random_state=42
-)
+# x_train, x_test, y_train, y_test = train_test_split(
+#     x, y, test_size=0.2, random_state=42
+# )
 
 # 特征标准化（FNN必须）
 # 标准化目的(需要分场景,有些情况不需要特征标准化)：
 # 1. 梯度下降会偏向大数值特征（如Population）
 # 2. 训练速度慢，可能无法收敛
 # 3. 模型性能差
-scaler = StandardScaler()
-x_train = scaler.fit_transform(x_train)
-x_test = scaler.transform(x_test)
+# scaler = StandardScaler()
+# x_train = scaler.fit_transform(x_train)
+# x_test = scaler.transform(x_test)
 
 # 【关键】转为PyTorch张量，并移到CUDA设备
 # 将训练数据转换为32位浮点型张量并移至指定设备。
