@@ -8,6 +8,8 @@
 # 导入PyTorch库及其相关模块，用于构建和训练神经网络模型。
 from ast import mod
 
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,6 +17,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 # 数据处理（通用，仅用于加载/划分/标准化）
 import numpy as np
+import pandas as pd
 # from sklearn.datasets import fetch_california_housing, make_classification
 # from sklearn.model_selection import train_test_split
 # from sklearn.preprocessing import StandardScaler
@@ -51,14 +54,30 @@ print("使用设备: ", device)
 #     x, y, test_size=0.2, random_state=42
 # )
 
+df = pd.read_csv("/home/hjg/dev/datasets/iris.data.txt")
+x = df.iloc[:, :-1].values
+y = df.iloc[:, -1].values
+
+x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=42)
+
 # 特征标准化（FNN必须）
 # 标准化目的(需要分场景,有些情况不需要特征标准化)：
 # 1. 梯度下降会偏向大数值特征（如Population）
 # 2. 训练速度慢，可能无法收敛
 # 3. 模型性能差
-# scaler = StandardScaler()
-# x_train = scaler.fit_transform(x_train)
-# x_test = scaler.transform(x_test)
+# 1. 创建编码器
+
+# 神经网络只支持32位浮点型和整数型标签，字符串标签必须转换为数字。LabelEncoder是一个工具类，用于将分类标签（如字符串）转换为整数编码，方便神经网络处理。
+le = LabelEncoder()
+
+# 2. 把字符串标签变成数字
+y_train = le.fit_transform(y_train)  
+y_test = le.transform(y_test)
+
+
+scaler = StandardScaler()
+x_train = scaler.fit_transform(x_train)
+x_test = scaler.transform(x_test)
 
 # 【关键】转为PyTorch张量，并移到CUDA设备
 # 将训练数据转换为32位浮点型张量并移至指定设备。
@@ -66,10 +85,10 @@ x_train = torch.tensor(x_train, dtype=torch.float32).to(device)
 
 # reshape(-1, 1) 的主要目的是将标签数据重塑为列向量（二维张量），以匹配模型输出和损失函数的维度要求。
 # 这个操作是为了确保 y_train 从 [样本数] 变成 [样本数, 1]，使其成为一个标准的列向量，从而能与模型输出的二维张量在维度上完全对齐，顺利进行数学运算或损失计算。
-y_train = torch.tensor(y_train, dtype=torch.float32).reshape(-1, 1).to(device)
+y_train = torch.tensor(y_train, dtype=torch.long).reshape(-1, 1).to(device)
 
 x_test = torch.tensor(x_test, dtype=torch.float32).to(device)
-y_test = torch.tensor(y_test, dtype=torch.float32).reshape(-1, 1).to(device)
+y_test = torch.tensor(y_test, dtype=torch.long).reshape(-1, 1).to(device)
 
 # 3-end: 加载数据 + 预处理
 
@@ -123,7 +142,8 @@ class FNN(nn.Module):
 
 
 # 初始化模型 + 移到CUDA
-model = FNN(input_dim=8).to(device)
+# 鸢尾花特征：4个特征
+model = FNN(input_dim=4).to(device)
 print(model)
 
 # 5-end: 定义 FNN 模型（纯 PyTorch）
