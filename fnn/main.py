@@ -83,12 +83,11 @@ x_test = scaler.transform(x_test)
 # 将训练数据转换为32位浮点型张量并移至指定设备。
 x_train = torch.tensor(x_train, dtype=torch.float32).to(device)
 
-# reshape(-1, 1) 的主要目的是将标签数据重塑为列向量（二维张量），以匹配模型输出和损失函数的维度要求。
-# 这个操作是为了确保 y_train 从 [样本数] 变成 [样本数, 1]，使其成为一个标准的列向量，从而能与模型输出的二维张量在维度上完全对齐，顺利进行数学运算或损失计算。
-y_train = torch.tensor(y_train, dtype=torch.long).reshape(-1, 1).to(device)
+# 对于分类任务，标签应该是 Long 类型的一维张量（不需要 reshape）
+y_train = torch.tensor(y_train, dtype=torch.long).to(device)
 
 x_test = torch.tensor(x_test, dtype=torch.float32).to(device)
-y_test = torch.tensor(y_test, dtype=torch.long).reshape(-1, 1).to(device)
+y_test = torch.tensor(y_test, dtype=torch.long).to(device)
 
 # 3-end: 加载数据 + 预处理
 
@@ -129,8 +128,8 @@ class FNN(nn.Module):
             input_dim, 64
         )  # 输入层到隐藏层，输入特征数为8，隐藏层神经元数为64
 
-        self.fc2 = nn.Linear(64, 32)  # 隐藏层到输出层，输出一个连续值（房价）
-        self.fc3 = nn.Linear(32, 1)  # 隐藏层到输出层，输出一个连续值（房价）
+        self.fc2 = nn.Linear(64, 32)  # 隐藏层1到隐藏层2
+        self.fc3 = nn.Linear(32, 3)  # 隐藏层2到输出层，输出3个类别的logits（鸢尾花有3类）
         self.relu = nn.ReLU()  # ReLU激活函数
 
     # （FNN核心逻辑）定义前向传播,在前向传播过程中，输入数据依次通过全连接层和ReLU激活函数，最终输出预测结果。
@@ -151,7 +150,8 @@ print(model)
 # 6-start: 定义损失函数 + 优化器
 
 # 衡量模型预测有多"错"
-criterion = nn.MSELoss()  # 均方误差损失函数
+# CrossEntropyLoss 会自动应用 Softmax，所以模型输出层不需要激活函数
+criterion = nn.CrossEntropyLoss()  # 交叉熵损失函数（用于多分类任务）
 
 optimizer = optim.Adam(model.parameters(), lr=0.001)  # Adam优化器
 
@@ -234,12 +234,15 @@ plt.show()
 
 # 9-start: 模型评估
 
-# 计算平均绝对误差（MAE），直观看预测精度
+# 对于分类任务，计算准确率而不是MAE
 model.eval()
 with torch.no_grad():
     y_pred = model(x_test)
-    mae = torch.mean(torch.abs(y_pred - y_test))
-    print(f"测试MAE: {mae.item():.4f} (10万美元)")
+    # 获取预测类别（取概率最大的类别）
+    _, predicted_classes = torch.max(y_pred, 1)
+    # 计算准确率
+    accuracy = (predicted_classes == y_test).sum().item() / y_test.size(0)
+    print(f"测试准确率: {accuracy * 100:.2f}%")
 
 # 9-end: 模型评估
 
@@ -248,11 +251,14 @@ with torch.no_grad():
 # 这里预测前5个样本
 model.eval()
 with torch.no_grad():
-    pred = model(x_test[:5]).cpu().numpy()  # 转回CPU用于打印
-    true = y_test[:5].cpu().numpy()
-
-print("预测房价:", pred.flatten())
-print("真实房价:", true.flatten())
+    pred = model(x_test[:5])
+    # 获取预测类别
+    _, predicted_classes = torch.max(pred, 1)
+    
+    # 打印预测结果和真实标签
+    print("预测类别:", predicted_classes.cpu().numpy())
+    print("真实类别:", y_test[:5].cpu().numpy())
+    print("类别名称:", [le.classes_[i] for i in predicted_classes.cpu().numpy()])
 
 # 10-end: 真实样本预测
 
@@ -260,9 +266,11 @@ print("真实房价:", true.flatten())
 
 torch.save(model.state_dict(), "model.pth")
 
-# 模型加载
-model = FNN(input_dim=8)
-model.load_state_dict(torch.load("model.pth"))
+# 模型加载（确保 input_dim 与训练时一致）
+model_loaded = FNN(input_dim=4)
+model_loaded.load_state_dict(torch.load("model.pth", weights_only=True))
+model_loaded.to(device)
+print("模型加载成功！")
 
 # end: 模型保存和加载
 
