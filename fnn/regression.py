@@ -32,11 +32,14 @@ FNN回归与分类的核心区别：
 # ============================================================
 # Step 1: 导入必要的库
 # ============================================================
+import datetime
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
+import pandas as pd
 import numpy as np
 from sklearn.datasets import make_regression  # 生成模拟回归数据
 from sklearn.model_selection import train_test_split
@@ -48,9 +51,12 @@ import matplotlib.pyplot as plt
 plt.rcParams["font.sans-serif"] = [
     "Noto Sans CJK JP",
     "WenQuanYi Zen Hei",
-    "SimHei", "DejaVu Sans",
+    "SimHei",
+    "DejaVu Sans",
 ]
 plt.rcParams["axes.unicode_minus"] = False
+
+now = datetime.datetime.now()
 
 
 # ============================================================
@@ -58,20 +64,32 @@ plt.rcParams["axes.unicode_minus"] = False
 # ============================================================
 class CONFIG:
     # --- 数据相关 ---
-    num_samples = 1000       # 样本总数
-    num_features = 10        # 输入特征维度
-    test_size = 0.2          # 测试集比例
-    random_state = 42        # 随机种子
+    num_samples = 22781  # 样本总数
+    num_features = 7  # 输入特征维度
+    test_size = 0.2  # 测试集比例
+    random_state = 42  # 随机种子
 
     # --- 模型相关 ---
-    hidden_dims = [128, 64]  # 隐藏层维度列表
-    dropout_rate = 0.2       # Dropout比率(回归任务通常比分类小，因为数据更平滑)
+    hidden_dims = [128, 64, 32, 16]  # 隐藏层维度列表
+    output_dim = 1  # 输出维度
+    dropout_rate = 0.15  # Dropout比率(回归任务通常比分类小，因为数据更平滑)
 
     # --- 训练相关 ---
-    batch_size = 32
-    learning_rate = 0.001
-    epochs = 100
-    patience = 15            # 早停耐心值(回归任务通常给更多耐心，因为损失波动更大)
+    batch_size = 16  # 小批次，表格数据/房价预测更稳定
+    learning_rate = 5e-4  # 降低学习率，解决后期损失波动，精细收敛
+    epochs = 150  # 放宽轮数，早停会自动控制
+
+    weight_decay = 5e-5  # 权重衰减，也叫 L2 正则化，是深度学习防止过拟合的核心参数，搭配 Adam 优化器使用；告诉优化器给模型的权重加一个轻微的惩罚，别让权重变得太大。
+
+    # 早停策略（核心优化）
+    early_stop_patience = 15  # 增加耐心，找到更优的收敛点
+    save_best_only = True  # 强制保存验证集最优模型
+
+    # 损失函数（不变，回归任务标准）
+    # MSELoss: 均方误差 = mean((pred - true)²)
+    # 优点：对大误差惩罚更大，适合大多数回归任务
+    # 缺点：对异常值敏感(因为平方会放大异常值的影响)
+    criterion = nn.MSELoss()
 
     # --- 设备 ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -83,7 +101,7 @@ class CONFIG:
 def load_data(cfg):
     """
     加载回归数据并预处理。
-    
+
     【回归数据预处理要点】
     1. 特征标准化：与分类相同，必须标准化
     2. 标签标准化：回归任务中，标签(y)也可以标准化！
@@ -93,24 +111,48 @@ def load_data(cfg):
     """
 
     # --- 方式1: 使用sklearn生成模拟数据 ---
-    X, y = make_regression(
-        n_samples=cfg.num_samples,
-        n_features=cfg.num_features,
-        n_informative=cfg.num_features,  # 所有特征都有信息
-        noise=10.0,                       # 添加噪声，模拟真实数据
-        random_state=cfg.random_state,
-    )
+    # X, y = make_regression(
+    #     n_samples=cfg.num_samples,
+    #     n_features=cfg.num_features,
+    #     n_informative=cfg.num_features,  # 所有特征都有信息
+    #     noise=10.0,                       # 添加噪声，模拟真实数据
+    #     random_state=cfg.random_state,
+    # )
 
     # --- 方式2: 加载你自己的数据 ---
-    # import pandas as pd
-    # df = pd.read_csv("your_data.csv")
-    # X = df.iloc[:, :-1].values
-    # y = df.iloc[:, -1].values  # 标签是连续数值
+    from sklearn.preprocessing import LabelEncoder
+
+    # 生成当前时间,格式yyyy-mm-dd hh:mm:ss
+    df = pd.read_csv(f"/home/hjg/dev/datasets/house-clean.csv")
+
+    # 处理分类特征：将字符串列编码为数字
+    # 方法：对每个分类列使用 LabelEncoder 转换
+    #   市区: "朝阳"→0, "海淀"→1, ... (10个区)
+    #   卧室数量: "1室"→0, "2室"→1, ...
+    #   朝向: "西"→0, "南北"→1, ...
+    #   电梯_清洗后: "有电梯"→0, "无电梯"→1, "未知"→2
+    #   装修_清洗后: "精装"→0, "简装"→1, ...
+    cat_cols = df.select_dtypes(exclude="number").columns.tolist()
+    # 去掉目标列(如果目标列也是字符串的话)
+    cat_cols = [c for c in cat_cols if c != df.columns[-1]]
+
+    label_encoders = {}  # 创建一个字典，用于保存每个列的编码器（后续可能需要反向转换）
+    for col in cat_cols:  # 遍历所有分类特征的列名
+        le_col = LabelEncoder()  # 为每一列创建一个新的标签编码器
+        df[col] = le_col.fit_transform(df[col])  # 将字符串类别转换为数字
+        label_encoders[col] = le_col  # 保存编码器，方便以后还原或处理新数据
+
+    X = df.iloc[:, :-1].values  # 所有特征(已编码为数字)
+    y = df.iloc[:, -1].values  # 标签是连续数值
 
     # Step 3.1: 划分训练集和测试集
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=cfg.test_size, random_state=cfg.random_state
     )
+
+    #  对房价标签做对数变换（房价数据天然右偏，这是房价预测提升效果最强的技巧）
+    y_train = np.log(y_train)  # 对数压缩房价，消除高值偏差
+    y_test = np.log(y_test)
 
     # Step 3.2: 特征标准化
     feature_scaler = StandardScaler()
@@ -137,7 +179,14 @@ def load_data(cfg):
     train_loader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=cfg.batch_size, shuffle=False)
 
-    return train_loader, test_loader, X_test.to(cfg.device), y_test.to(cfg.device), feature_scaler, y_scaler
+    return (
+        train_loader,
+        test_loader,
+        X_test.to(cfg.device),
+        y_test.to(cfg.device),
+        feature_scaler,
+        y_scaler,
+    )
 
 
 # ============================================================
@@ -146,12 +195,12 @@ def load_data(cfg):
 class FNNRegressor(nn.Module):
     """
     前馈神经网络回归器。
-    
+
     【与分类模型的关键区别】
     1. 输出层只有1个神经元(回归预测单个连续值)
     2. 输出层不加激活函数(因为预测值可以是任意实数，不能限制在0-1之间)
     3. 如果多目标回归(预测多个数值)，输出层神经元数=目标数
-    
+
     【为什么回归输出层不加激活函数？】
     - ReLU: 输出≥0，无法预测负数(如温度-10°C)
     - Sigmoid: 输出0-1，范围太窄
@@ -159,7 +208,7 @@ class FNNRegressor(nn.Module):
     - 无激活: 输出可以是任意实数(-∞ ~ +∞)，完美适配回归
     """
 
-    def __init__(self, input_dim, hidden_dims, dropout_rate=0.2):
+    def __init__(self, input_dim, output_dim, hidden_dims, dropout_rate=0.2):
         super(FNNRegressor, self).__init__()
 
         layers = []
@@ -174,7 +223,7 @@ class FNNRegressor(nn.Module):
             prev_dim = hidden_dim
 
         # 输出层: 1个神经元，无激活函数
-        layers.append(nn.Linear(prev_dim, 1))
+        layers.append(nn.Linear(prev_dim, output_dim))
 
         self.network = nn.Sequential(*layers)
 
@@ -197,7 +246,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device):
         batch_y = batch_y.to(device)
 
         optimizer.zero_grad()
-        outputs = model(batch_x)           # (batch_size,)
+        outputs = model(batch_x)  # (batch_size,)
         loss = criterion(outputs, batch_y)  # 标签也是1维的
         loss.backward()
         optimizer.step()
@@ -243,21 +292,20 @@ def main():
 
     # --- 加载数据 ---
     train_loader, test_loader, X_test, y_test, feature_scaler, y_scaler = load_data(cfg)
-    print(f"训练集大小: {len(train_loader.dataset)}, 测试集大小: {len(test_loader.dataset)}")
+    print(
+        f"训练集大小: {len(train_loader.dataset)}, 测试集大小: {len(test_loader.dataset)}"
+    )
 
     # --- 创建模型 ---
     model = FNNRegressor(
         input_dim=cfg.num_features,
+        output_dim=cfg.output_dim,
         hidden_dims=cfg.hidden_dims,
         dropout_rate=cfg.dropout_rate,
     ).to(cfg.device)
     print(f"\n模型结构:\n{model}")
 
     # --- 损失函数和优化器 ---
-    # MSELoss: 均方误差 = mean((pred - true)²)
-    # 优点：对大误差惩罚更大，适合大多数回归任务
-    # 缺点：对异常值敏感(因为平方会放大异常值的影响)
-    criterion = nn.MSELoss()
 
     # 如果数据中有较多异常值，可以改用 L1Loss (MAE):
     # criterion = nn.L1Loss()  # 平均绝对误差 = mean(|pred - true|)
@@ -265,7 +313,9 @@ def main():
     # 或者使用 SmoothL1Loss (Huber Loss)，对异常值更鲁棒:
     # criterion = nn.SmoothL1Loss()  # 误差小时用平方，误差大时用绝对值
 
-    optimizer = optim.Adam(model.parameters(), lr=cfg.learning_rate)
+    optimizer = optim.Adam(
+        model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+    )
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=5
     )
@@ -279,8 +329,10 @@ def main():
 
     print("\n开始训练...")
     for epoch in range(cfg.epochs):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, cfg.device)
-        val_loss, _, _ = evaluate(model, test_loader, criterion, cfg.device)
+        train_loss = train_one_epoch(
+            model, train_loader, cfg.criterion, optimizer, cfg.device
+        )
+        val_loss, _, _ = evaluate(model, test_loader, cfg.criterion, cfg.device)
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
@@ -294,7 +346,7 @@ def main():
             best_model_state = model.state_dict().copy()
         else:
             patience_counter += 1
-            if patience_counter >= cfg.patience:
+            if patience_counter >= cfg.early_stop_patience:
                 print(f"\n早停触发！在第 {epoch + 1} 轮停止训练")
                 break
 
@@ -312,12 +364,18 @@ def main():
     # ============================================================
     # Step 7: 最终评估
     # ============================================================
-    _, all_preds_scaled, all_labels_scaled = evaluate(model, test_loader, criterion, cfg.device)
+    _, all_preds_scaled, all_labels_scaled = evaluate(
+        model, test_loader, cfg.criterion, cfg.device
+    )
 
     # 反标准化：将预测值和真实值还原到原始尺度
     # 因为我们对y做了标准化，所以需要用y_scaler反变换才能看到真实数值
-    all_preds_real = y_scaler.inverse_transform(all_preds_scaled.reshape(-1, 1)).flatten()
-    all_labels_real = y_scaler.inverse_transform(all_labels_scaled.reshape(-1, 1)).flatten()
+    all_preds_real = y_scaler.inverse_transform(
+        all_preds_scaled.reshape(-1, 1)
+    ).flatten()
+    all_labels_real = y_scaler.inverse_transform(
+        all_labels_scaled.reshape(-1, 1)
+    ).flatten()
 
     # 计算评估指标(在原始尺度上)
     mse = mean_squared_error(all_labels_real, all_preds_real)
@@ -358,7 +416,9 @@ def main():
     axes[1].legend()
 
     plt.tight_layout()
-    plt.savefig("fnn/fnn_regression_training.png", dpi=150)
+    plt.savefig(
+        f"fnn/fnn_regression_training_{now.strftime('%Y-%m-%d_%H-%M-%S')}.png", dpi=150
+    )
     plt.show()
 
     # ============================================================
@@ -370,28 +430,37 @@ def main():
         preds_scaled = model(sample_x).cpu().numpy()
         # 反标准化得到真实预测值
         preds_real = y_scaler.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
-        labels_real = y_scaler.inverse_transform(y_test[:5].cpu().numpy().reshape(-1, 1)).flatten()
+        labels_real = y_scaler.inverse_transform(
+            y_test[:5].cpu().numpy().reshape(-1, 1)
+        ).flatten()
 
         print("\n单样本预测示例(原始尺度):")
         for i in range(5):
             error = abs(preds_real[i] - labels_real[i])
-            print(f"  样本{i}: 真实值={labels_real[i]:.2f}, 预测值={preds_real[i]:.2f}, 误差={error:.2f}")
+            print(
+                f"  样本{i}: 真实值={labels_real[i]:.2f}, 预测值={preds_real[i]:.2f}, 误差={error:.2f}"
+            )
 
     # ============================================================
     # Step 10: 模型保存与加载
     # ============================================================
-    model_path = "fnn/fnn_regression_model.pth"
+    model_path = f"fnn/fnn_regression_model_{now.strftime('%Y-%m-%d_%H-%M-%S')}.pth"
     torch.save(model.state_dict(), model_path)
     print(f"\n模型已保存到: {model_path}")
 
-    loaded_model = FNNRegressor(
-        input_dim=cfg.num_features,
-        hidden_dims=cfg.hidden_dims,
-        dropout_rate=cfg.dropout_rate,
-    ).to(cfg.device)
-    loaded_model.load_state_dict(torch.load(model_path, weights_only=True, map_location=cfg.device))
-    loaded_model.eval()
-    print("模型加载成功！")
+    # loaded_model = FNNRegressor(
+    #     input_dim=cfg.num_features,
+    #     output_dim=cfg.output_dim,
+    #     hidden_dims=cfg.hidden_dims,
+    #     dropout_rate=cfg.dropout_rate,
+    # ).to(cfg.device)
+    # loaded_model.load_state_dict(
+    #     torch.load(model_path, weights_only=True, map_location=cfg.device)
+    # )
+    # loaded_model.eval()
+    # print("模型加载成功！")
+
+    print("\n回归任务训练和评估完成！")  # 结束语，标志流程完成
 
     # ============================================================
     # Step 11: 对新数据进行预测(生产环境用法)
