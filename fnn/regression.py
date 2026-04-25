@@ -63,6 +63,8 @@ now = datetime.datetime.now()
 # Step 2: 配置超参数
 # ============================================================
 class CONFIG:
+    datasets_path="/home/hjg/dev/datasets/house-clean.csv"
+
     # --- 数据相关 ---
     num_samples = 22781  # 样本总数
     num_features = 7  # 输入特征维度
@@ -123,7 +125,7 @@ def load_data(cfg):
     from sklearn.preprocessing import LabelEncoder
 
     # 生成当前时间,格式yyyy-mm-dd hh:mm:ss
-    df = pd.read_csv(f"/home/hjg/dev/datasets/house-clean.csv")
+    df = pd.read_csv(cfg.datasets_path)
 
     # 处理分类特征：将字符串列编码为数字
     # 方法：对每个分类列使用 LabelEncoder 转换
