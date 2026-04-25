@@ -358,7 +358,7 @@ def main():
     axes[1].legend()
 
     plt.tight_layout()
-    plt.savefig("fnn_regression_training.png", dpi=150)
+    plt.savefig("fnn/fnn_regression_training.png", dpi=150)
     plt.show()
 
     # ============================================================
@@ -380,7 +380,7 @@ def main():
     # ============================================================
     # Step 10: 模型保存与加载
     # ============================================================
-    model_path = "fnn_regression_model.pth"
+    model_path = "fnn/fnn_regression_model.pth"
     torch.save(model.state_dict(), model_path)
     print(f"\n模型已保存到: {model_path}")
 
