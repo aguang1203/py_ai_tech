@@ -64,7 +64,7 @@ now = datetime.datetime.now()
 class CONFIG:
     """超参数配置中心 —— 所有可调参数集中在此，方便统一管理和实验对比。"""
 
-    datasets_path = "/home/hjg/dev/datasets/house-clean.csv"
+    datasets_path = "datasets/house-clean.csv"
 
     # --- 数据相关 ---
     # num_features: 输入特征维度，设为 None 表示自动检测
@@ -139,6 +139,29 @@ class CONFIG:
 
     save_best_only = True  # 只保存验证集最优模型(而非最后一轮)
 
+    # --- 学习率调度器 ---
+    # ReduceLROnPlateau: 验证损失停滞时自动降低学习率
+    #   lr_factor=0.5: 每次LR减半(不要太激进，0.5是常用值)
+    #   lr_patience=8: 连续8轮无改善才降LR(给模型足够的探索时间)
+    #   lr_min=1e-6: LR下限，不会降到0
+    lr_factor = 0.5
+    lr_patience = 8
+    lr_min = 1e-6
+
+    # --- 梯度裁剪 ---
+    # max_grad_norm=1.0: 梯度L2范数的上限
+    #   原理：当 ‖g‖ > max_grad_norm 时，等比缩放梯度
+    #   为什么是1.0？经验值，通常1.0效果很好
+    #     太大(10.0)裁不到，太小(0.01)限制太死，学习变慢
+    #   回归任务的损失landscape比分类更崎岖，裁剪防止梯度爆炸
+    max_grad_norm = 1.0
+
+    # --- 目标列 ---
+    # target_col=-1: 标签列的位置(支持列名或列索引)
+    #   -1 表示最后一列(默认)，也可以指定列名如 "price"
+    #   如果你的标签不在最后一列，修改此处即可
+    target_col = -1
+
     # --- 损失函数 ---
     # SmoothL1Loss (Huber Loss): 兼顾MSE和MAE优点的损失函数
     #
@@ -208,7 +231,11 @@ def load_data(cfg):
     #   例："市区"有10个区，只生成9列。如果9列全为0，就自动推断是第10个区
     #   为什么？避免"多重共线性"——一列可以用其他列推出，导致数值不稳定
     #   数学上：10列的和恒为1，信息冗余；9列已经完整编码所有类别
-    target_col = df.columns[-1]
+    # target_col支持列名(str)或列索引(int)，-1表示最后一列
+    if isinstance(cfg.target_col, str):
+        target_col = cfg.target_col
+    else:
+        target_col = df.columns[cfg.target_col]
     cat_cols = df.select_dtypes(exclude="number").columns.tolist()
     cat_cols = [c for c in cat_cols if c != target_col]
 
@@ -395,7 +422,7 @@ class FNNRegressor(nn.Module):
 # ============================================================
 # Step 5: 训练和评估函数
 # ============================================================
-def train_one_epoch(model, train_loader, criterion, optimizer, device):
+def train_one_epoch(model, train_loader, criterion, optimizer, device, max_grad_norm=1.0):
     """
     训练一个epoch。
 
@@ -420,15 +447,13 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device):
         loss.backward()             # Step 4: 反向传播，计算梯度
 
         # 梯度裁剪：在Step 4和Step 5之间插入
-        # 原理：当所有参数梯度的L2范数 > max_norm 时，等比缩放梯度
-        #   ‖g‖ = sqrt(Σgᵢ²)，若 ‖g‖ > 1.0，则 g = g * (1.0 / ‖g‖)
+        # 原理：当所有参数梯度的L2范数 > max_grad_norm 时，等比缩放梯度
+        #   ‖g‖ = sqrt(Σgᵢ²)，若 ‖g‖ > max_grad_norm，则 g = g * (max_grad_norm / ‖g‖)
         # 为什么需要？回归任务的损失landscape比分类更崎岖
         #   偶尔遇到异常样本时，梯度可能突然变得很大(梯度爆炸)
         #   不裁剪：参数一步跨太远，损失飙升，甚至训练崩溃
         #   裁剪后：梯度方向不变，只限制步长，训练更稳定
-        # max_norm=1.0：经验值，通常1.0效果很好
-        #   太大(10.0)裁不到，太小(0.01)限制太死，学习变慢
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
 
         optimizer.step()            # Step 5: 更新参数
 
@@ -521,7 +546,7 @@ def main():
     #   patience=8: 连续8轮无改善才降LR(给模型足够的探索时间)
     #   min_lr=1e-6: LR下限，不会降到0
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=8, min_lr=1e-6
+        optimizer, mode="min", factor=cfg.lr_factor, patience=cfg.lr_patience, min_lr=cfg.lr_min
     )
 
     # --- 训练循环 ---
@@ -546,7 +571,7 @@ def main():
     print("\n开始训练...")
     for epoch in range(cfg.epochs):
         train_loss = train_one_epoch(
-            model, train_loader, cfg.criterion, optimizer, cfg.device
+            model, train_loader, cfg.criterion, optimizer, cfg.device, cfg.max_grad_norm
         )
         val_loss, _, _ = evaluate(model, test_loader, cfg.criterion, cfg.device)
 
@@ -654,7 +679,6 @@ def main():
     # ============================================================
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    # 损失曲线
     # 损失曲线
     # 横轴=训练轮数，纵轴=损失值
     # 理想情况：训练和验证损失都持续下降，最终趋于平稳

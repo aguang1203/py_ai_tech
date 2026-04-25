@@ -69,7 +69,7 @@ now = datetime.datetime.now()
 class CONFIG:
     """超参数配置中心 —— 所有可调参数集中在此，方便统一管理和实验对比。"""
 
-    datasets_path = "/home/hjg/dev/datasets/red-winequality.csv"
+    datasets_path = "datasets/red-winequality.csv"
 
     # --- 数据相关 ---
     # num_features: 输入特征维度，设为 None 表示自动检测
@@ -150,15 +150,32 @@ class CONFIG:
     #   需要足够耐心等它收敛
     early_stop_patience = 20
 
+    # --- 学习率调度器 ---
+    # ReduceLROnPlateau: 验证损失停滞时自动降低学习率
+    #   lr_factor=0.5: 每次LR减半(不要太激进，0.5是常用值)
+    #   lr_patience=8: 连续8轮无改善才降LR(给模型足够的探索时间)
+    #   lr_min=1e-6: LR下限，不会降到0
+    lr_factor = 0.5
+    lr_patience = 8
+    lr_min = 1e-6
+
+    # --- 梯度裁剪 ---
+    # max_grad_norm=1.0: 梯度L2范数的上限
+    #   原理：当 ‖g‖ > max_grad_norm 时，等比缩放梯度
+    #   为什么是1.0？经验值，通常1.0效果很好
+    #     太大(10.0)裁不到，太小(0.01)限制太死，学习变慢
+    #   什么时候需要？不平衡数据下少数类梯度可能很大，裁剪防止训练崩溃
+    max_grad_norm = 1.0
+
     # --- 类别不平衡处理 ---
     # use_class_weight=True: 是否在损失函数中使用类别权重
     #   原理：给少数类更大的权重，多数类更小的权重
     #   效果：模型不再"偏心"于多数类，被迫也关注少数类
-    #   计算方式：weight_i = N / (C * n_i)，N=总样本数，C=类别数，n_i=第i类样本数
-    #   例：低品质63条 → weight ≈ 1599/(3×63) ≈ 8.46
-    #       中品质1319条 → weight ≈ 1599/(3×1319) ≈ 0.40
-    #       高品质217条 → weight ≈ 1599/(3×217) ≈ 2.46
-    #   含义：模型预测错1条低品质样本的惩罚 ≈ 预测错21条中品质样本
+    #   计算方式：weight_i = sqrt(N / (C * n_i))，N=总样本数，C=类别数，n_i=第i类样本数
+    #   例：低品质63条 → weight ≈ sqrt(8.46) ≈ 2.91
+    #       中品质1319条 → weight ≈ sqrt(0.40) ≈ 0.63
+    #       高品质217条 → weight ≈ sqrt(2.46) ≈ 1.57
+    #   使用sqrt平滑而非原始逆频率，避免权重过于激进
     use_class_weight = True
 
     # use_weighted_sampler=False: 是否使用加权随机采样器
@@ -171,6 +188,12 @@ class CONFIG:
     #     实测：同时使用时准确率仅15%，模型把中品质全预测为低品质
     #     只用class_weight更稳定，足以让模型关注少数类
     use_weighted_sampler = False
+
+    # --- 目标列 ---
+    # target_col=-1: 标签列的位置(支持列名或列索引)
+    #   -1 表示最后一列(默认)，也可以指定列名如 "quality"
+    #   如果你的标签不在最后一列，修改此处即可
+    target_col = -1
 
     # --- 设备 ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -196,7 +219,11 @@ def load_data(cfg):
     print(f"列名: {list(df.columns)}")
 
     # 分离特征和标签
-    target_col = df.columns[-1]  # 最后一列是标签(quality)
+    # target_col支持列名(str)或列索引(int)，-1表示最后一列
+    if isinstance(cfg.target_col, str):
+        target_col = cfg.target_col
+    else:
+        target_col = df.columns[cfg.target_col]
     X = df.drop(columns=[target_col]).values.astype(np.float32)
     y = df[target_col].values
 
@@ -443,7 +470,7 @@ class FNNClassifier(nn.Module):
 # ============================================================
 # Step 5: 训练和评估函数
 # ============================================================
-def train_one_epoch(model, train_loader, criterion, optimizer, device):
+def train_one_epoch(model, train_loader, criterion, optimizer, device, max_grad_norm=1.0):
     """
     训练一个epoch。
 
@@ -469,11 +496,11 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device):
 
         # 梯度裁剪：在Step 4和Step 5之间插入
         # 原理：当所有参数梯度的L2范数 > max_norm 时，等比缩放梯度
-        #   ‖g‖ = sqrt(Σgᵢ²)，若 ‖g‖ > 1.0，则 g = g * (1.0 / ‖g‖)
+        #   ‖g‖ = sqrt(Σgᵢ²)，若 ‖g‖ > max_norm，则 g = g * (max_norm / ‖g‖)
         # 为什么需要？不平衡数据下，少数类样本可能产生很大的梯度
         #   不裁剪：参数一步跨太远，损失飙升
         #   裁剪后：梯度方向不变，只限制步长，训练更稳定
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
 
         optimizer.step()            # Step 5: 更新参数
 
@@ -582,7 +609,7 @@ def main():
     #   patience=8: 连续8轮无改善才降LR
     #   min_lr=1e-6: LR下限
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=8, min_lr=1e-6
+        optimizer, mode="min", factor=cfg.lr_factor, patience=cfg.lr_patience, min_lr=cfg.lr_min
     )
 
     # --- 训练循环 ---
@@ -604,7 +631,7 @@ def main():
     print("\n开始训练...")
     for epoch in range(cfg.epochs):
         train_loss = train_one_epoch(
-            model, train_loader, criterion, optimizer, cfg.device
+            model, train_loader, criterion, optimizer, cfg.device, cfg.max_grad_norm
         )
         val_loss, val_acc, _, _ = evaluate(model, test_loader, criterion, cfg.device)
 
