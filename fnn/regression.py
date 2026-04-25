@@ -45,7 +45,11 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 import matplotlib.pyplot as plt
 
-plt.rcParams["font.sans-serif"] = ["SimHei", "WenQuanYi Micro Hei", "DejaVu Sans"]
+plt.rcParams["font.sans-serif"] = [
+    "Noto Sans CJK JP",
+    "WenQuanYi Zen Hei",
+    "SimHei", "DejaVu Sans",
+]
 plt.rcParams["axes.unicode_minus"] = False
 
 
@@ -263,7 +267,7 @@ def main():
 
     optimizer = optim.Adam(model.parameters(), lr=cfg.learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=5, verbose=True
+        optimizer, mode="min", factor=0.5, patience=5
     )
 
     # --- 训练循环 ---

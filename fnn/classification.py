@@ -44,7 +44,11 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 import matplotlib.pyplot as plt
 
 # 设置中文字体(如果系统没有SimHei，可以换成其他中文字体或注释掉)
-plt.rcParams["font.sans-serif"] = ["SimHei", "WenQuanYi Micro Hei", "DejaVu Sans"]
+plt.rcParams["font.sans-serif"] = [
+    "Noto Sans CJK JP",
+    "WenQuanYi Zen Hei",
+    "SimHei", "DejaVu Sans",
+]
 plt.rcParams["axes.unicode_minus"] = False
 
 
@@ -281,7 +285,7 @@ def main():
     # 学习率调度器：验证损失停滞时自动降低学习率
     # ReduceLROnPlateau: 当监控指标不再下降时，将学习率乘以factor
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=5, verbose=True
+        optimizer, mode="min", factor=0.5, patience=5
     )
 
     # --- 训练循环 ---
@@ -371,7 +375,7 @@ def main():
     axes[1].legend()
 
     plt.tight_layout()
-    plt.savefig("fnn_classification_training.png", dpi=150)
+    plt.savefig("/fnn/fnn_classification_training.png", dpi=150)
     plt.show()
 
     # ============================================================
@@ -398,7 +402,7 @@ def main():
     # ============================================================
     # Step 10: 模型保存与加载
     # ============================================================
-    model_path = "fnn_classification_model.pth"
+    model_path = "/fnn/fnn_classification_model.pth"
     torch.save(model.state_dict(), model_path)
     print(f"\n模型已保存到: {model_path}")
 
@@ -425,6 +429,8 @@ def main():
     #     preds = torch.argmax(probs, dim=1)
     # print("新数据预测结果:", preds.cpu().numpy())
 
+    # 退出程序
+    plt.close()
 
 if __name__ == "__main__":
     main()
