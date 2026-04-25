@@ -86,7 +86,7 @@ now = datetime.datetime.now()
 class CONFIG:
     """超参数配置中心 —— 所有可调参数集中在此，方便统一管理和实验对比。"""
 
-    datasets_path = "datasets/multilabel-classification-red-winequality.csv"
+    datasets_path = "datasets/multilabel-moral_foundation_news.csv"
 
     # --- 数据相关 ---
     # num_features: 输入特征维度，设为 None 表示自动检测
