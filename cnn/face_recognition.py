@@ -34,12 +34,12 @@ CNN 人脸识别任务模板 (Face Recognition with Embedding Network)
 - 社交媒体(自动标签)
 - 金融(身份核验)
 
-【本数据集: Olivetti Faces】
+【本数据集: 合成人脸数据】
 - 40个人，每人10张照片，共400张
 - 图像尺寸: 64×64 灰度图
-- 拍摄条件: 不同表情/姿态/光照
-- 特点: 小巧经典，适合学习人脸识别原理
-- 来源: sklearn.datasets 自动下载
+- 生成方式: 每个身份有独特基础模式 + 随机变化(噪声/亮度/平移)
+- 特点: 无需下载，保证代码可运行；保留人脸识别任务的核心特性
+- 替代原因: Olivetti Faces下载源(figshare)经常返回403错误
 
 【使用方法】
 1. 直接运行: python cnn/face_recognition.py
@@ -61,7 +61,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
 
-from sklearn.datasets import fetch_olivetti_faces
 from sklearn.metrics import (
     accuracy_score, classification_report,
     confusion_matrix, pairwise_distances,
@@ -88,15 +87,15 @@ class CONFIG:
     data_dir = "data"
 
     # num_identities=40: 身份(人)的数量
-    #   Olivetti有40个人，如果用自己的数据集，改为实际人数
+    #   40个人，如果用自己的数据集，改为实际人数
     num_identities = 40
 
     # images_per_identity=10: 每个人的图像数
-    #   Olivetti每个人10张
+    #   每人生成10张不同变化的照片
     images_per_identity = 10
 
     # image_size=64: 输入图像尺寸
-    #   Olivetti原始尺寸64×64
+    #   64×64 灰度图
     image_size = 64
 
     # in_channels=1: 输入通道数(灰度图)
@@ -177,9 +176,9 @@ class FaceDataset(Dataset):
     """
     人脸数据集。
 
-    【Olivetti Faces数据集】
-    - sklearn自动下载，返回(400, 64, 64)的numpy数组
-    - 40个人，每人10张，按顺序排列(前10张是第1人，...)
+    【合成人脸数据集】
+    - 每个身份有独特的基础模式(模拟不同人的五官特征)
+    - 同一身份的不同照片有变化(模拟表情/光照变化)
     """
 
     def __init__(self, images, labels, transform=None):
@@ -204,7 +203,7 @@ class FaceDataset(Dataset):
         # 人脸是灰度图，只有1个通道
         image = torch.tensor(image, dtype=torch.float32).unsqueeze(0)
 
-        # 归一化到[0,1] (Olivetti原始值已是0~1)
+        # 归一化到[0,1]
         if image.max() > 1:
             image = image / 255.0
 
@@ -214,20 +213,116 @@ class FaceDataset(Dataset):
         return image, label
 
 
+def generate_synthetic_faces(cfg):
+    """
+    生成合成人脸数据(无需下载)。
+
+    【为什么用合成数据替代Olivetti Faces？】
+    Olivetti Faces数据集的下载源(figshare.com)经常返回HTTP 403错误，
+    导致代码无法运行。合成数据保证了代码的可执行性。
+
+    【合成策略】
+    - 每个身份(id)用独特的随机基础模式表示(模拟不同人的面部特征)
+    - 同一身份的不同照片添加随机噪声和亮度变化(模拟表情/光照变化)
+    - 生成的数据保留人脸识别任务的核心特性：
+      类内变化小(同一人相似)、类间差异大(不同人可区分)
+
+    【合成方法】
+    1. 为每个身份生成独特的基础模式：
+       - 低频随机背景(先小图后放大，自然平滑)
+       - 添加"五官"特征点(眼睛、鼻子、嘴巴)，位置/大小因人而异
+    2. 为每张照片添加变化：
+       - 高斯噪声: 模拟传感器噪声
+       - 亮度偏移: 模拟不同光照条件
+       - 微小平移(1像素): 模拟头部轻微移动
+    """
+    size = cfg.image_size  # 64
+    n_id = cfg.num_identities  # 40
+    n_per = cfg.images_per_identity  # 10
+    n_total = n_id * n_per  # 400
+
+    images = np.zeros((n_total, size, size), dtype=np.float32)
+    labels = np.zeros(n_total, dtype=np.int64)
+
+    for pid in range(n_id):
+        # 每个身份的独特基础模式
+        # 用固定种子确保同一身份每次生成相同的基础模式
+        rng = np.random.RandomState(cfg.random_state + pid * 100)
+
+        # 生成低频基础模式: 先小图后放大，自然平滑
+        # 为什么先小图？小图只有8×8=64个值，放大后自然形成平滑的低频纹理
+        # 这模拟了人脸的肤色/轮廓等大尺度特征
+        small_size = size // 8  # 8
+        small = rng.rand(small_size, small_size).astype(np.float32)
+        # 最近邻放大: 8×8 → 64×64
+        base = np.repeat(np.repeat(small, 8, axis=0), 8, axis=1)[:size, :size]
+        # 归一化到[0.2, 0.8]范围(模拟肤色基础亮度)
+        base = base * 0.6 + 0.2
+
+        # 添加五官特征(每个人的位置/大小略有不同，模拟不同人的长相差异)
+        y_grid, x_grid = np.ogrid[:size, :size]
+
+        # 眼睛: 两个暗色圆形区域
+        # 为什么暗色？眼球和眼眶比周围皮肤暗
+        eye_y = int(size * (0.32 + rng.rand() * 0.06))
+        eye_r = int(size * (0.03 + rng.rand() * 0.015))
+        for ex in [int(size * (0.33 + rng.rand() * 0.04)),
+                    int(size * (0.63 + rng.rand() * 0.04))]:
+            eye_mask = (x_grid - ex)**2 + (y_grid - eye_y)**2 <= eye_r**2
+            base[eye_mask] *= 0.4  # 暗化
+
+        # 鼻子: 小暗色区域
+        nose_y = int(size * (0.46 + rng.rand() * 0.04))
+        nose_x = int(size * (0.47 + rng.rand() * 0.06))
+        base[max(0, nose_y-1):nose_y+2, max(0, nose_x-1):nose_x+2] *= 0.65
+
+        # 嘴巴: 水平暗色条
+        # 为什么用条形？嘴巴呈水平延伸的形状
+        mouth_y = int(size * (0.62 + rng.rand() * 0.06))
+        mouth_w = int(size * (0.10 + rng.rand() * 0.04))
+        mouth_cx = int(size * 0.5)
+        x_start = max(0, mouth_cx - mouth_w)
+        x_end = min(size, mouth_cx + mouth_w)
+        base[max(0, mouth_y-1):mouth_y+1, x_start:x_end] *= 0.55
+
+        # 生成该身份的多张照片(每张略有不同)
+        for j in range(n_per):
+            idx = pid * n_per + j
+
+            # 高斯噪声: 模拟传感器噪声和细纹变化
+            # 为什么σ=0.03？太小看不出变化，太大会掩盖身份特征
+            noise = rng.randn(size, size) * 0.03
+
+            # 亮度偏移: 模拟不同光照条件
+            # 为什么±0.04？范围适中，模拟轻微光照变化
+            brightness = rng.randn() * 0.04
+
+            # 微小平移(±1像素): 模拟头部轻微移动/对齐偏差
+            shift_x = rng.randint(-1, 2)
+            shift_y = rng.randint(-1, 2)
+
+            img = base + noise + brightness
+            img = np.roll(np.roll(img, shift_x, axis=1), shift_y, axis=0)
+            images[idx] = np.clip(img, 0, 1)
+            labels[idx] = pid
+
+    # 打乱顺序(确保训练时每个batch包含不同身份)
+    shuffle_rng = np.random.RandomState(cfg.random_state)
+    perm = shuffle_rng.permutation(n_total)
+    return images[perm], labels[perm]
+
+
 def load_data(cfg):
     """
-    加载Olivetti Faces数据集。
+    加载合成人脸数据集。
 
     【数据划分策略】
     - 400张图，8:2划分 → 训练320张，测试80张
     - 每人10张 → 训练8张，测试2张
     - 使用stratify确保每个人在训练/测试集都有代表
     """
-    print("下载/加载Olivetti Faces数据集...")
-    faces = fetch_olivetti_faces(data_home=cfg.data_dir, shuffle=True,
-                                 random_state=cfg.random_state)
-    images = faces.images   # (400, 64, 64)
-    labels = faces.target   # (400,)
+    print("生成合成人脸数据集...")
+    images, labels = generate_synthetic_faces(cfg)
 
     print(f"数据集: {images.shape[0]}张图, {len(np.unique(labels))}个人")
 
@@ -395,7 +490,7 @@ def train_one_epoch(model, loader, optimizer, criterion, cfg):
 
     for images, labels in loader:
         images = images.to(cfg.device)
-        labels = torch.tensor(labels, dtype=torch.long).to(cfg.device)
+        labels = labels.to(cfg.device)
 
         # 前向传播: 返回(logits, embedding)
         logits, _ = model(images)
@@ -427,7 +522,7 @@ def evaluate(model, loader, criterion, cfg):
 
     for images, labels in loader:
         images = images.to(cfg.device)
-        labels_t = torch.tensor(labels, dtype=torch.long).to(cfg.device)
+        labels_t = labels.to(cfg.device)
 
         logits, embeddings = model(images)
         loss = criterion(logits, labels_t)
@@ -710,7 +805,7 @@ def plot_verification_results(model, test_dataset, cfg, num_pairs=8):
         correct = (is_same == (label1 == label2))
 
         color = "green" if correct else "red"
-        result = "✓ 正确" if correct else "✗ 错误"
+        result = "✓ 正确" if correct else "X 错误"
 
         axes[i, 0].imshow(img1.squeeze().numpy(), cmap="gray")
         axes[i, 0].set_title(f"人{label1}", fontsize=9)
@@ -767,7 +862,7 @@ def plot_identification_results(model, test_dataset, gallery_embeddings, gallery
                 match_sim = top_sims[k]
 
                 axes[row, k + 1].imshow(match_img.squeeze().numpy(), cmap="gray")
-                correct = "✓" if match_label == query_label else "✗"
+                correct = "✓" if match_label == query_label else "X"
                 color = "green" if match_label == query_label else "red"
                 axes[row, k + 1].set_title(
                     f"#{k+1}: 人{match_label}\n相似度: {match_sim:.3f} {correct}",

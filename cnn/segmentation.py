@@ -37,11 +37,12 @@ DeepLabV3 = Backbone(ResNet) + ASPP(多尺度空洞卷积) + 解码器
 - 人像分割(背景替换/美颜)
 - 工业检测(缺陷区域分割)
 
-【本数据集: Pascal VOC 2012】
-- 20个语义类别 + 1个背景类
-- 约1,464张训练图像，1,449张验证图像
-- 图像尺寸不固定(约500×300)
-- 分割标注: 每个像素的类别索引(0=背景, 1-20=各类)
+【本数据集: 合成分割数据集】
+- 5个类别: 背景、圆形、矩形、三角形、条纹
+- 即时生成，无需下载(替代VOC 2012，后者约2GB下载缓慢)
+- 图像尺寸: 128×128 RGB
+- 分割标注: 每个像素的类别索引(0=背景, 1-4=各类形状)
+- 替代原因: VOC 2012数据集约2GB，下载经常超时；合成数据保证代码可运行
 
 【使用方法】
 1. 直接运行: python cnn/segmentation.py
@@ -74,23 +75,6 @@ plt.rcParams["font.sans-serif"] = [
 ]
 plt.rcParams["axes.unicode_minus"] = False
 
-# VOC 20类名称 + 背景
-VOC_CLASSES = [
-    "背景", "飞机", "自行车", "鸟", "船", "瓶子", "公交车", "汽车",
-    "猫", "椅子", "牛", "餐桌", "狗", "马", "摩托车", "人",
-    "盆栽", "羊", "沙发", "火车", "电视",
-]
-
-# 可视化用的颜色表(VOC标准)
-VOC_COLORS = np.array([
-    [0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0],
-    [0, 0, 128], [128, 0, 128], [0, 128, 128], [128, 128, 128],
-    [64, 0, 0], [192, 0, 0], [64, 128, 0], [192, 128, 0],
-    [64, 0, 128], [192, 0, 128], [64, 128, 128], [192, 128, 128],
-    [0, 64, 0], [128, 64, 0], [0, 192, 0], [128, 192, 0],
-    [0, 64, 128],
-], dtype=np.uint8)
-
 
 # ============================================================
 # Step 2: 配置超参数
@@ -99,23 +83,20 @@ class CONFIG:
     """超参数配置中心 —— 图像分割任务的所有可调参数。"""
 
     # --- 数据相关 ---
-    # data_dir: VOC数据集存放目录
+    # data_dir: 数据集存放目录(合成数据不需要，但保留接口)
     data_dir = "data"
 
-    # num_classes=21: VOC 20类 + 1背景
-    #   微调自己的数据时，改为你的类别数+1
-    num_classes = 21
+    # num_classes=5: 背景 + 4种形状
+    #   微调自己的数据时，改为你的类别数
+    num_classes = 5
 
     # class_names: 类别名称(索引0=背景)
-    class_names = VOC_CLASSES
+    class_names = ["背景", "圆形", "矩形", "三角形", "条纹"]
 
-    # image_size=520: 训练时图像的裁剪尺寸
-    #   【为什么是520？】
-    #   VOC图像约500×300，需要统一尺寸输入网络
-    #   520是8的倍数(下采样倍率=8，520/8=65，整除)
-    #   为什么不裁剪到32×32？分割需要高分辨率保持空间细节
-    #   520×520是在精度和显存之间的平衡
-    image_size = 520
+    # image_size=128: 训练时图像尺寸
+    #   合成数据用128×128，比VOC(520)小但足够学习分割原理
+    #   128是8的倍数(下采样倍率=8，128/8=16，整除)
+    image_size = 128
 
     # --- 模型相关 ---
     # model_name: 分割模型名称
@@ -127,11 +108,10 @@ class CONFIG:
     #   其他选择: FCN(更简单), UNet(医学影像常用), DeepLabV3+(更强)
     model_name = "deeplabv3"
 
-    # pretrained=True: 使用COCO预训练权重
-    #   【分割预训练的特殊性】
-    #   COCO预训练的分割模型已学会识别常见物体的轮廓
-    #   微调时只需要学习新类别的边界
-    pretrained = True
+    # use_pretrained=True: 使用COCO预训练权重初始化backbone
+    #   预训练的ResNet50已学会提取边缘/纹理等底层特征
+    #   即使数据集不同(形状vs COCO)，底层特征仍可复用
+    use_pretrained = True
 
     # --- 训练相关 ---
     # batch_size=4: 每批图像数
@@ -181,99 +161,187 @@ class CONFIG:
                           "mps" if torch.backends.mps.is_available() else "cpu")
 
 
+import torchvision.transforms.functional as F
+
+
 # ============================================================
-# Step 3: 数据加载和预处理
+# Step 3: 合成分割数据集
 # ============================================================
-class SegmentationTransform:
+class SyntheticSegmentationDataset(torch.utils.data.Dataset):
     """
-    分割数据变换：同时变换图像和标注。
+    合成分割数据集: 生成含有几何形状的图像和对应的像素级标注。
 
-    【分割数据增强的特殊之处】
-    - 分类: 只需变换图像
-    - 分割: 图像和标注必须同步变换！
-      如果图像水平翻转，标注也必须翻转，否则像素对不上
+    【为什么用合成数据替代VOC 2012？】
+    VOC 2012数据集约2GB，下载经常超时或卡住。
+    合成数据即时生成，无需下载，且保留分割任务的核心要素：
+      1. 多类别(不同形状=不同类别)
+      2. 像素级标注(每个像素一个类别标签)
+      3. 需要精确的边界预测(形状边缘)
+
+    【合成方法】
+    - 在128×128画布上随机放置3-7个几何形状
+    - 形状类型: 圆形(1)、矩形(2)、三角形(3)、条纹(4)
+    - 每个形状有随机位置、大小、颜色
+    - 标注掩码: 每个像素的类别索引(0=背景, 1-4=形状)
+    - 后放置的形状会覆盖先放置的(模拟遮挡关系)
     """
 
-    def __init__(self, image_size, is_train=True):
-        self.image_size = image_size
-        self.is_train = is_train
+    # 分割可视化颜色表(5类: 背景+4种形状)
+    COLORS = np.array([
+        [0, 0, 0],       # 0: 背景 - 黑色
+        [200, 0, 0],     # 1: 圆形 - 红色
+        [0, 200, 0],     # 2: 矩形 - 绿色
+        [0, 0, 200],     # 3: 三角形 - 蓝色
+        [200, 200, 0],   # 4: 条纹 - 黄色
+    ], dtype=np.uint8)
 
-    def __call__(self, image, target):
+    def __init__(self, num_samples=500, image_size=128, num_classes=5,
+                 is_train=True, random_state=42):
         """
         参数:
-            image: PIL Image
-            target: PIL Image (分割标注，每个像素是类别索引)
+            num_samples: 样本数量
+            image_size: 图像尺寸(正方形)
+            num_classes: 类别数(含背景)
+            is_train: 是否为训练集(训练集添加噪声增强)
+            random_state: 随机种子
         """
-        # 随机裁剪(训练时)
+        self.num_samples = num_samples
+        self.image_size = image_size
+        self.num_classes = num_classes
+        self.is_train = is_train
+
+        # 预生成所有样本的随机种子(确保可复现)
+        rng = np.random.RandomState(random_state)
+        self.seeds = rng.randint(0, 100000, num_samples)
+
+    def __len__(self):
+        return self.num_samples
+
+    def _generate_sample(self, seed):
+        """根据种子生成一个样本(图像+掩码)"""
+        rng = np.random.RandomState(seed)
+        size = self.image_size
+
+        # 空白图像(灰色背景)和掩码
+        image = np.ones((size, size, 3), dtype=np.float32) * 0.6
+        mask = np.zeros((size, size), dtype=np.int64)
+
+        # 随机放置3-7个形状
+        # 为什么3-7？太少(1-2)场景太简单，太多(10+)形状重叠严重
+        num_shapes = rng.randint(3, 8)
+        for _ in range(num_shapes):
+            # 类别1-4(跳过0=背景)
+            class_id = rng.randint(1, self.num_classes)
+            # 随机颜色(形状的颜色不影响分类，但增加视觉多样性)
+            color = rng.rand(3) * 0.6 + 0.2
+
+            if class_id == 1:  # 圆形
+                cx = rng.randint(15, size - 15)
+                cy = rng.randint(15, size - 15)
+                r = rng.randint(8, max(9, size // 5))
+                y, x = np.ogrid[:size, :size]
+                circle = (x - cx)**2 + (y - cy)**2 <= r**2
+                image[circle] = color
+                mask[circle] = class_id
+
+            elif class_id == 2:  # 矩形
+                x1 = rng.randint(5, size - 30)
+                y1 = rng.randint(5, size - 30)
+                w = rng.randint(12, max(13, size // 4))
+                h = rng.randint(12, max(13, size // 4))
+                x2 = min(x1 + w, size)
+                y2 = min(y1 + h, size)
+                image[y1:y2, x1:x2] = color
+                mask[y1:y2, x1:x2] = class_id
+
+            elif class_id == 3:  # 三角形
+                # 用三个顶点定义三角形
+                pts = np.array([
+                    [rng.randint(10, size - 10), rng.randint(10, size - 10)],
+                    [rng.randint(10, size - 10), rng.randint(10, size - 10)],
+                    [rng.randint(10, size - 10), rng.randint(10, size - 10)],
+                ])
+                # 使用向量化的点-in-三角形判断
+                y, x = np.mgrid[:size, :size]
+                coords = np.column_stack((x.ravel(), y.ravel()))
+                # 三次叉积法判断点是否在三角形内
+                v0, v1, v2 = pts[0], pts[1], pts[2]
+                def sign(p1, p2, p3):
+                    return (p1[:, 0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[:, 1] - p3[1])
+                d1 = sign(coords, v0, v1)
+                d2 = sign(coords, v1, v2)
+                d3 = sign(coords, v2, v0)
+                has_neg = (d1 < 0) | (d2 < 0) | (d3 < 0)
+                has_pos = (d1 > 0) | (d2 > 0) | (d3 > 0)
+                triangle = (~(has_neg & has_pos)).reshape(size, size)
+                image[triangle] = color
+                mask[triangle] = class_id
+
+            elif class_id == 4:  # 条纹(水平或垂直交替色带)
+                is_horizontal = rng.rand() > 0.5
+                stripe_width = rng.randint(4, max(5, size // 8))
+                if is_horizontal:
+                    for sy in range(0, size, stripe_width * 2):
+                        y_start = sy
+                        y_end = min(sy + stripe_width, size)
+                        image[y_start:y_end, :] = color
+                        mask[y_start:y_end, :] = class_id
+                else:
+                    for sx in range(0, size, stripe_width * 2):
+                        x_start = sx
+                        x_end = min(sx + stripe_width, size)
+                        image[:, x_start:x_end] = color
+                        mask[:, x_start:x_end] = class_id
+
+        # 训练集添加轻微噪声(增强鲁棒性)
         if self.is_train:
-            # 随机裁剪到固定尺寸
-            i, j, h, w = transforms.RandomCrop.get_params(
-                image, output_size=(self.image_size, self.image_size),
-            )
-            image = F.crop(image, i, j, h, w)
-            target = F.crop(target, i, j, h, w)
+            image += rng.randn(size, size, 3) * 0.02
+            image = np.clip(image, 0, 1)
 
-            # 随机水平翻转(图像和标注同步)
-            if torch.rand(1) < 0.5:
-                image = F.hflip(image)
-                target = F.hflip(target)
-        else:
-            # 验证/测试: 只做Resize
-            image = F.resize(image, self.image_size)
-            target = F.resize(target, self.image_size, interpolation=Image.NEAREST)
-            # NEAREST: 分割标注必须用最近邻插值，不能用双线性
-            # 因为标注是类别索引，双线性插值会产生非法的中间值
+        return image, mask
 
-        # 图像转Tensor并标准化
-        image = F.to_tensor(image)
-        image = F.normalize(image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    def __getitem__(self, idx):
+        image, mask = self._generate_sample(self.seeds[idx])
 
-        # 标注转Tensor (保持为整数索引)
-        target = torch.as_tensor(np.array(target), dtype=torch.long)
+        # 转为Tensor
+        # image: (H, W, 3) → (3, H, W)
+        image = torch.tensor(image).permute(2, 0, 1).float()
+        # 标准化(ImageNet标准，与预训练backbone匹配)
+        image = F.normalize(image, mean=[0.485, 0.456, 0.406],
+                           std=[0.229, 0.224, 0.225])
+        mask = torch.tensor(mask, dtype=torch.long)
 
-        return image, target
+        return image, mask
 
 
 def get_dataloaders(cfg):
     """
-    加载VOC分割数据集。
+    创建合成分割数据集的DataLoader。
 
-    【VOCSegmentation数据集说明】
-    - 10,582张训练图像(含增广), 1,449张验证图像
-    - 标注为PNG图像，每个像素值=类别索引
-    - 255=忽略边界(不参与训练和评估)
+    【数据量说明】
+    - 训练集: 500张(即时生成)
+    - 验证集: 100张(即时生成)
+    - 无需下载，首次运行即用
     """
-    from torchvision.transforms.functional import crop as F_crop
-    import torchvision.transforms.functional as F
-
-    train_transform = SegmentationTransform(cfg.image_size, is_train=True)
-    val_transform = SegmentationTransform(cfg.image_size, is_train=False)
-
-    try:
-        train_dataset = datasets.VOCSegmentation(
-            root=cfg.data_dir, year="2012", image_set="train",
-            download=True, transforms=train_transform,
-        )
-        val_dataset = datasets.VOCSegmentation(
-            root=cfg.data_dir, year="2012", image_set="val",
-            download=True, transforms=val_transform,
-        )
-    except Exception as e:
-        print(f"VOC数据集加载失败: {e}")
-        print("请手动下载VOC2012数据集到 data/VOCdevkit/ 目录")
-        raise
+    train_dataset = SyntheticSegmentationDataset(
+        num_samples=500, image_size=cfg.image_size,
+        num_classes=cfg.num_classes, is_train=True, random_state=42,
+    )
+    val_dataset = SyntheticSegmentationDataset(
+        num_samples=100, image_size=cfg.image_size,
+        num_classes=cfg.num_classes, is_train=False, random_state=42,
+    )
 
     # DataLoader
-    # collate_fn=custom_collate: 处理不同尺寸的图像
     pin_mem = cfg.device.type == "cuda"
 
     train_loader = DataLoader(
         train_dataset, batch_size=cfg.batch_size, shuffle=True,
-        num_workers=2, pin_memory=pin_mem,
+        num_workers=0, pin_memory=pin_mem,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=cfg.batch_size, shuffle=False,
-        num_workers=2, pin_memory=pin_mem,
+        num_workers=0, pin_memory=pin_mem,
     )
 
     print(f"训练集: {len(train_dataset)}张 | 验证集: {len(val_dataset)}张")
@@ -303,16 +371,15 @@ def get_segmentation_model(cfg):
       5个分支concat → 1×1卷积 → 输出
       → 多尺度信息融合，同时检测大小不同的物体
     """
-    if cfg.pretrained and cfg.num_classes == 21:
-        # VOC预训练
-        model = deeplabv3_resnet50(pretrained=True)
-    else:
-        # 微调: 替换分类头
-        model = deeplabv3_resnet50(pretrained=False, num_classes=cfg.num_classes)
+    # 使用COCO预训练的backbone，替换分类头为5类
+    # 为什么用预训练？即使数据集不同(形状vs自然物体)，
+    # ResNet50学到的边缘/纹理底层特征仍可复用，加速收敛
+    weights = "DEFAULT" if cfg.use_pretrained else None
+    model = deeplabv3_resnet50(weights=weights)
 
-    # 如果微调自己的数据(类别数!=21)，需要替换分类头
-    if cfg.num_classes != 21:
-        model.classifier = DeepLabHead(2048, cfg.num_classes)
+    # 替换分类头(5类: 背景+4种形状)
+    # 预训练模型是21类(VOC)，需要替换为我们自己的类别数
+    model.classifier = DeepLabHead(2048, cfg.num_classes)
 
     return model
 
@@ -551,11 +618,11 @@ def plot_segmentation_result(model, val_loader, cfg, num_samples=4):
 
         # 真实标注 → 彩色图
         gt = targets[i].numpy()
-        gt_color = VOC_COLORS[gt % len(VOC_COLORS)]
+        gt_color = SyntheticSegmentationDataset.COLORS[gt % len(SyntheticSegmentationDataset.COLORS)]
 
         # 预测 → 彩色图
         pred = preds[i]
-        pred_color = VOC_COLORS[pred % len(VOC_COLORS)]
+        pred_color = SyntheticSegmentationDataset.COLORS[pred % len(SyntheticSegmentationDataset.COLORS)]
 
         axes[i, 0].imshow(img)
         axes[i, 0].set_title("原图")
@@ -641,7 +708,7 @@ def predict(model, image, cfg):
         ))
 
     # 彩色可视化
-    pred_color = VOC_COLORS[pred_mask % len(VOC_COLORS)]
+    pred_color = SyntheticSegmentationDataset.COLORS[pred_mask % len(SyntheticSegmentationDataset.COLORS)]
 
     return pred_mask, pred_color
 
@@ -662,13 +729,8 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
 
     # 加载数据
-    print("\n加载VOC 2012分割数据集...")
-    try:
-        train_loader, val_loader = get_dataloaders(cfg)
-    except Exception as e:
-        print(f"数据加载失败: {e}")
-        print("尝试使用预训练模型进行推理演示...")
-        train_loader, val_loader = None, None
+    print("\n加载合成分割数据集...")
+    train_loader, val_loader = get_dataloaders(cfg)
 
     # 创建模型
     print("\n加载DeepLabV3模型(ResNet50 backbone)...")
@@ -677,57 +739,31 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     print(f"模型参数量: {total_params:,}")
 
-    if train_loader is not None:
-        # 训练
-        model, history = train(model, train_loader, val_loader, cfg)
+    # 训练
+    model, history = train(model, train_loader, val_loader, cfg)
 
-        # 最终评估
-        print(f"\n{'='*60}")
-        print("最终评估...")
-        miou, pixel_acc, iou_per_class = evaluate(model, val_loader, cfg)
-        print(f"mIoU: {miou:.4f} | Pixel Accuracy: {pixel_acc:.4f}")
+    # 最终评估
+    print(f"\n{'='*60}")
+    print("最终评估...")
+    miou, pixel_acc, iou_per_class = evaluate(model, val_loader, cfg)
+    print(f"mIoU: {miou:.4f} | Pixel Accuracy: {pixel_acc:.4f}")
 
-        # 各类别IoU
-        print("\n各类别IoU:")
-        for i, iou in enumerate(iou_per_class):
-            name = cfg.class_names[i] if i < len(cfg.class_names) else f"类{i}"
-            print(f"  {name}: {iou:.4f}")
+    # 各类别IoU
+    print("\n各类别IoU:")
+    for i, iou in enumerate(iou_per_class):
+        name = cfg.class_names[i] if i < len(cfg.class_names) else f"类{i}"
+        print(f"  {name}: {iou:.4f}")
 
-        # 保存模型
-        model_path = os.path.join(cfg.save_dir, "deeplabv3_segmentation.pth")
-        torch.save(model.state_dict(), model_path)
-        print(f"\n✓ 模型已保存: {model_path}")
+    # 保存模型
+    model_path = os.path.join(cfg.save_dir, "deeplabv3_segmentation.pth")
+    torch.save(model.state_dict(), model_path)
+    print(f"\n✓ 模型已保存: {model_path}")
 
-        # 可视化
-        plot_training_curves(history, cfg)
-        plot_segmentation_result(model, val_loader, cfg)
-        if iou_per_class:
-            plot_class_iou(iou_per_class, cfg)
-    else:
-        # 仅推理演示
-        print("\n推理演示(无训练数据)...")
-
-        # 使用VOC预训练模型直接推理
-        demo_img = Image.new("RGB", (520, 520), color=(100, 150, 200))
-        from PIL import ImageDraw
-        draw = ImageDraw.Draw(demo_img)
-        draw.rectangle([100, 100, 400, 400], fill=(0, 128, 0))  # 模拟物体
-        draw.ellipse([200, 200, 350, 350], fill=(128, 0, 0))
-
-        pred_mask, pred_color = predict(model, demo_img, cfg)
-
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-        ax1.imshow(demo_img)
-        ax1.set_title("输入图像")
-        ax1.axis("off")
-        ax2.imshow(pred_color)
-        ax2.set_title("分割预测")
-        ax2.axis("off")
-
-        save_path = os.path.join(cfg.save_dir, "segmentation_demo.png")
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"✓ 推理演示已保存: {save_path}")
-        plt.close()
+    # 可视化
+    plot_training_curves(history, cfg)
+    plot_segmentation_result(model, val_loader, cfg)
+    if iou_per_class:
+        plot_class_iou(iou_per_class, cfg)
 
     print(f"\n{'='*60}")
     print("完成!")

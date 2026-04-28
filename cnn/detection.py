@@ -62,6 +62,7 @@ from torch.utils.data import Dataset, DataLoader
 import torchvision
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
 from torchvision.transforms import functional as F
 
 # 设置中文字体
@@ -191,8 +192,10 @@ def get_detection_model(cfg):
     """
     if cfg.pretrained and cfg.num_classes == 81:
         # 直接使用COCO预训练模型(81类)
+        # 使用weights参数替代已废弃的pretrained参数
+        # 【为什么用COCO_V1？】COCO数据集包含80类常见物体，是最通用的检测预训练权重
         model = fasterrcnn_resnet50_fpn(
-            pretrained=True,
+            weights=FasterRCNN_ResNet50_FPN_Weights.COCO_V1,
             min_size=cfg.min_size,
             max_size=cfg.max_size,
         )
@@ -202,7 +205,7 @@ def get_detection_model(cfg):
         # 1. 保留backbone(已学会通用特征: 边缘/纹理/形状)
         # 2. 替换分类头(旧头是81类，新头是你的类别数)
         # 3. 只需少量数据就能训练出好模型
-        model = fasterrcnn_resnet50_fpn(pretrained=True)
+        model = fasterrcnn_resnet50_fpn(weights=FasterRCNN_ResNet50_FPN_Weights.COCO_V1)
 
         # 替换分类头
         # 原始分类头: Linear(in_features, 81)

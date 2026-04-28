@@ -24,10 +24,11 @@ CNN 图像分类任务模板 (Convolutional Neural Network for Image Classificat
 - 商品分类 (电商/零售)
 - 动植物识别
 
-【本数据集: CIFAR-10】
-- 10个类别: 飞机、汽车、鸟、猫、鹿、狗、青蛙、马、船、卡车
-- 60,000张 32×32 彩色图像 (训练50,000 + 测试10,000)
-- 特点: 图像小、类别均衡、含背景噪声，是图像分类的标准入门数据集
+【本数据集: Fashion-MNIST】
+- 10个类别: T恤、裤子、套头衫、连衣裙、外套、凉鞋、衬衫、运动鞋、包、短靴
+- 70,000张 28×28 灰度图像 (训练60,000 + 测试10,000)
+- 特点: MNIST的现代替代品，比CIFAR-10更小(30MB vs 170MB)，下载更快更稳定
+- 相比CIFAR-10: 灰度图(1通道 vs 3通道)，尺寸更小(28 vs 32)，但分类难度适中
 
 【使用方法】
 1. 修改 CONFIG 部分的超参数
@@ -76,24 +77,25 @@ class CONFIG:
     #   如果已有数据，直接指向数据目录即可
     data_dir = "data"
 
-    # num_classes=10: CIFAR-10有10个类别
+    # num_classes=10: Fashion-MNIST有10个类别
     #   如果用自己的数据集，改为实际类别数
     num_classes = 10
 
     # class_names: 类别名称(用于可视化)
     class_names = [
-        "飞机", "汽车", "鸟", "猫", "鹿",
-        "狗", "青蛙", "马", "船", "卡车",
+        "T恤", "裤子", "套头衫", "连衣裙", "外套",
+        "凉鞋", "衬衫", "运动鞋", "包", "短靴",
     ]
 
-    # image_size=32: 输入图像尺寸(CIFAR-10原始尺寸)
+    # image_size=28: 输入图像尺寸(Fashion-MNIST原始尺寸)
     #   如果用自己的数据，根据图像大小调整
-    #   常见值: MNIST=28, CIFAR=32, ImageNet=224
-    image_size = 32
+    #   常见值: MNIST/Fashion-MNIST=28, CIFAR=32, ImageNet=224
+    image_size = 28
 
-    # in_channels=3: 输入通道数(RGB彩色图)
+    # in_channels=1: 输入通道数(灰度图)
     #   灰度图=1, RGB彩色图=3, RGBA=4
-    in_channels = 3
+    #   Fashion-MNIST是灰度图，所以=1
+    in_channels = 1
 
     # test_size=0.2: 验证集比例(从训练集中划出)
     #   CIFAR-10训练集50000张，划出20%=10000张作为验证集
@@ -173,19 +175,15 @@ class CONFIG:
     use_augmentation = True
 
     # random_crop_padding=4: RandomCrop的填充像素
-    #   先填充4像素(32→40)，再随机裁剪回32×32
+    #   先填充4像素(28→36)，再随机裁剪回28×28
     #   效果：图像内容略有偏移，模拟物体位置变化
     random_crop_padding = 4
 
     # random_hflip_prob=0.5: 随机水平翻转概率
     #   为什么0.5？50%概率翻转，最常用的增强方式
     #   注意：数字/文字识别不适合翻转(6和9会混淆)
+    #   Fashion-MNIST: 衣服翻转还是衣服，所以可以翻转
     random_hflip_prob = 0.5
-
-    # color_jitter: 颜色抖动参数(亮度/对比度/饱和度/色相)
-    #   模拟不同光照、相机条件下的颜色变化
-    #   为什么0.2？太大会改变物体颜色(绿色车变红车)，太小没效果
-    color_jitter = (0.2, 0.2, 0.2, 0.1)
 
     # --- 保存相关 ---
     # save_dir: 模型和图表保存目录
@@ -208,17 +206,17 @@ def get_transforms(cfg):
     - 测试集：只做标准化，评估模型在原始数据上的真实性能
     - 数据增强只在训练时使用，测试时不能用(否则评估结果不可靠)
 
-    【CIFAR-10标准化参数】
-    - mean=[0.4914, 0.4822, 0.4465]: CIFAR-10三个通道的均值
-    - std=[0.2470, 0.2435, 0.2616]: CIFAR-10三个通道的标准差
-    - 这些值是对整个CIFAR-10训练集统计得出的
-    - 为什么不简单用0.5? CIFAR-10的R通道偏亮(均值0.49)，B通道偏暗(均值0.45)
+    【Fashion-MNIST标准化参数】
+    - mean=[0.2860]: Fashion-MNIST单通道的均值
+    - std=[0.3530]: Fashion-MNIST单通道的标准差
+    - 这些值是对整个Fashion-MNIST训练集统计得出的
+    - 灰度图只有1个通道，所以均值和标准差各只有1个值
     - 用准确的统计值让标准化更有效，加速训练收敛
     """
-    # CIFAR-10的均值和标准差(对训练集统计得出)
+    # Fashion-MNIST的均值和标准差(对训练集统计得出)
     normalize = transforms.Normalize(
-        mean=[0.4914, 0.4822, 0.4465],
-        std=[0.2470, 0.2435, 0.2616],
+        mean=[0.2860],
+        std=[0.3530],
     )
 
     if cfg.use_augmentation:
@@ -228,20 +226,16 @@ def get_transforms(cfg):
         # 等价于告诉模型："同一个物体可能有不同位置/方向/颜色"
         train_transform = transforms.Compose([
             # 1. 随机裁剪：先填充再裁剪，模拟物体位置偏移
-            #    填充4像素 → 32x32变成40x40 → 随机裁剪回32x32
+            #    填充4像素 → 28x28变成36x36 → 随机裁剪回28x28
             #    为什么这样做？物体不一定总在画面正中央
             transforms.RandomCrop(cfg.image_size, padding=cfg.random_crop_padding),
 
             # 2. 随机水平翻转：50%概率左右翻转
-            #    为什么可以翻转？猫朝左和朝右都是猫
+            #    为什么可以翻转？衣服翻转还是衣服
             #    什么时候不能翻？数字识别(6翻转变9)、文字
             transforms.RandomHorizontalFlip(p=cfg.random_hflip_prob),
 
-            # 3. 颜色抖动：随机改变亮度/对比度/饱和度/色相
-            #    模拟不同光照和拍摄条件
-            transforms.ColorJitter(*cfg.color_jitter),
-
-            # 4. 转为张量(0~255 → 0~1) + 标准化(减均值除标准差 → 约-2~2)
+            # 3. 转为张量(0~255 → 0~1) + 标准化(减均值除标准差 → 约-2~2)
             transforms.ToTensor(),
             normalize,
         ])
@@ -262,7 +256,7 @@ def get_transforms(cfg):
 
 def get_dataloaders(cfg):
     """
-    加载CIFAR-10数据集并创建DataLoader。
+    加载Fashion-MNIST数据集并创建DataLoader。
 
     【DataLoader参数说明】
     - batch_size: 每批样本数，GPU并行处理
@@ -271,17 +265,23 @@ def get_dataloaders(cfg):
       为什么用2？Windows上>0有时报错，Linux上2-4比较合适
     - pin_memory=True: 将数据固定在内存，加速CPU→GPU传输
       仅在GPU训练时有效，CPU训练时可设False
+
+    【为什么换用Fashion-MNIST？】
+    - CIFAR-10约170MB，下载慢且经常超时
+    - Fashion-MNIST仅30MB，下载快速稳定
+    - 同样是10类分类任务，难度适中，更适合入门学习
+    - MNIST的替代品：数字太简单(99%+准确率)，衣服更有挑战性
     """
     train_transform, val_transform = get_transforms(cfg)
 
-    # 下载并加载训练集(50,000张)
+    # 下载并加载训练集(60,000张)
     # train=True: 加载训练集；download=True: 自动下载
-    train_dataset = datasets.CIFAR10(
+    train_dataset = datasets.FashionMNIST(
         root=cfg.data_dir, train=True, download=True, transform=train_transform,
     )
 
     # 下载并加载测试集(10,000张)
-    test_dataset = datasets.CIFAR10(
+    test_dataset = datasets.FashionMNIST(
         root=cfg.data_dir, train=False, download=True, transform=val_transform,
     )
 
@@ -301,9 +301,8 @@ def get_dataloaders(cfg):
     )
 
     # 验证集使用val_transform(不做数据增强)
-    # random_split只是索引划分，底层dataset的transform不变
-    # 所以需要创建一个用val_transform的数据集
-    val_dataset = datasets.CIFAR10(
+    # 创建一个用val_transform的数据集，然后用相同索引划分
+    val_dataset = datasets.FashionMNIST(
         root=cfg.data_dir, train=True, download=False, transform=val_transform,
     )
     val_subset = torch.utils.data.Subset(val_dataset, val_subset.indices)
@@ -732,17 +731,17 @@ def plot_sample_predictions(model, test_loader, cfg, num_samples=16):
         preds = outputs.argmax(1).cpu()
 
     # 反标准化用于显示
-    mean = torch.tensor([0.4914, 0.4822, 0.4465]).view(3, 1, 1)
-    std = torch.tensor([0.2470, 0.2435, 0.2616]).view(3, 1, 1)
+    mean = torch.tensor([0.2860]).view(1, 1, 1)
+    std = torch.tensor([0.3530]).view(1, 1, 1)
 
     fig, axes = plt.subplots(4, 4, figsize=(14, 14))
     for i, ax in enumerate(axes.flat):
         if i >= num_samples:
             break
         img = images[i] * std + mean  # 反标准化
-        img = img.permute(1, 2, 0).numpy().clip(0, 1)
+        img = img.squeeze().numpy().clip(0, 1)  # 灰度图去掉通道维
 
-        ax.imshow(img)
+        ax.imshow(img, cmap="gray")
         true_name = cfg.class_names[labels[i]]
         pred_name = cfg.class_names[preds[i]]
         confidence = probs[i, preds[i]].item()
@@ -832,7 +831,7 @@ def predict(model, image_tensor, cfg):
 # ============================================================
 def main():
     print("=" * 60)
-    print("CNN 图像分类 - CIFAR-10")
+    print("CNN 图像分类 - Fashion-MNIST")
     print("=" * 60)
 
     cfg = CONFIG()
