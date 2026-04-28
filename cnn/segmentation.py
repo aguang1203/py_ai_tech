@@ -68,6 +68,7 @@ import torchvision
 from torchvision.models.segmentation import deeplabv3_resnet50
 from torchvision.models.segmentation.deeplabv3 import DeepLabHead
 from torchvision import datasets, transforms
+import torchvision.transforms.functional as F
 
 # 设置中文字体
 plt.rcParams["font.sans-serif"] = [
@@ -147,6 +148,17 @@ class CONFIG:
     # --- 梯度裁剪 ---
     max_grad_norm = 5.0
 
+    # --- 混合精度训练(AMP) ---
+    # use_amp=True: 启用自动混合精度，训练速度提升1.5-2倍
+    #   仅CUDA(GPU)有效，CPU自动降级为普通训练
+    #   原理: 将部分float32运算自动转为float16，加快速度、减少显存
+    use_amp = True
+
+    # --- 数据加载优化 ---
+    # num_workers: 多进程并行加载数据，加速训练
+    #   0=主进程加载(慢)，2-4=推荐值
+    num_workers = min(4, os.cpu_count() or 1)
+
     # --- 评估相关 ---
     # ignore_index=255: 忽略的标签值
     #   VOC标注中，边界像素标注为255(忽略区域)
@@ -160,8 +172,6 @@ class CONFIG:
     device = torch.device("cuda" if torch.cuda.is_available() else
                           "mps" if torch.backends.mps.is_available() else "cpu")
 
-
-import torchvision.transforms.functional as F
 
 
 # ============================================================
@@ -334,14 +344,17 @@ def get_dataloaders(cfg):
 
     # DataLoader
     pin_mem = cfg.device.type == "cuda"
+    pw = cfg.num_workers > 0  # persistent_workers: 保持子进程活跃
 
     train_loader = DataLoader(
         train_dataset, batch_size=cfg.batch_size, shuffle=True,
-        num_workers=0, pin_memory=pin_mem,
+        num_workers=cfg.num_workers, pin_memory=pin_mem,
+        persistent_workers=pw,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=cfg.batch_size, shuffle=False,
-        num_workers=0, pin_memory=pin_mem,
+        num_workers=cfg.num_workers, pin_memory=pin_mem,
+        persistent_workers=pw,
     )
 
     print(f"训练集: {len(train_dataset)}张 | 验证集: {len(val_dataset)}张")
@@ -387,7 +400,7 @@ def get_segmentation_model(cfg):
 # ============================================================
 # Step 5: 训练函数
 # ============================================================
-def train_one_epoch(model, loader, optimizer, criterion, cfg):
+def train_one_epoch(model, loader, optimizer, criterion, cfg, scaler=None):
     """
     训练一个epoch。
 
@@ -399,30 +412,30 @@ def train_one_epoch(model, loader, optimizer, criterion, cfg):
     model.train()
     total_loss = 0
     total_pixels = 0
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
 
     for images, targets in loader:
         images = images.to(cfg.device)
         # targets: (batch, H, W)，每个值是类别索引
         targets = targets.to(cfg.device)
 
-        # 前向传播
-        # 分割模型返回字典 {"out": main_output, "aux": auxiliary_output}
-        outputs = model(images)["out"]  # (batch, num_classes, H, W)
-
-        # 计算损失
-        # outputs: (batch, num_classes, H, W) → 每个像素在各类的得分
-        # targets: (batch, H, W) → 每个像素的真实类别
-        # ignore_index=255: 边界像素不参与计算
-        loss = criterion(outputs, targets)
+        # 前向传播(混合精度)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            outputs = model(images)["out"]  # (batch, num_classes, H, W)
+            loss = criterion(outputs, targets)
 
         # 反向传播
         optimizer.zero_grad()
-        loss.backward()
-
-        # 梯度裁剪
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
-
-        optimizer.step()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+            optimizer.step()
 
         # 统计(只计非忽略像素)
         valid_mask = targets != cfg.ignore_index
@@ -445,29 +458,43 @@ def evaluate(model, loader, cfg):
     为什么不用像素准确率？
     - 像素准确率会被大类别主导(背景占60%+，预测全背景也有60%)
     - mIoU对每个类别单独评估，小类别的性能也能体现
+
+    【向量化计算 — 比逐像素循环快100倍】
+    原始方法: for循环遍历每个像素，逐个更新混淆矩阵 → 极慢
+    向量化方法: 用numpy批量操作一次更新所有像素 → 极快
+    原理: np.add.at(conf_mat, (真实类别数组, 预测类别数组), 1)
+      等价于: 对每个(真实, 预测)对，在conf_mat对应位置+1
+      但用C层循环实现，比Python for循环快两个数量级
     """
     model.eval()
-    # 混淆矩阵: (num_classes, num_classes)
-    # conf_mat[i][j] = 真实为i但预测为j的像素数
-    conf_mat = torch.zeros(cfg.num_classes, cfg.num_classes)
+    # 用numpy数组存储混淆矩阵(比torch在CPU上更快)
+    conf_mat = np.zeros((cfg.num_classes, cfg.num_classes), dtype=np.int64)
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
 
     for images, targets in loader:
         images = images.to(cfg.device)
-        outputs = model(images)["out"]  # (batch, C, H, W)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            outputs = model(images)["out"]  # (batch, C, H, W)
 
         # 取每个像素的最大类别
-        preds = outputs.argmax(dim=1).cpu()  # (batch, H, W)
+        preds = outputs.argmax(dim=1).cpu().numpy()  # (batch, H, W)
         targets_np = targets.numpy()
-        preds_np = preds.numpy()
 
-        # 更新混淆矩阵
+        # 向量化更新混淆矩阵(替代原来的三层嵌套循环)
+        # 1. 找出有效像素(非ignore_index)
         valid = targets_np != cfg.ignore_index
-        for i in range(targets_np.shape[0]):  # batch
-            t = targets_np[i][valid[i]]
-            p = preds_np[i][valid[i]]
-            for ti, pi in zip(t.flatten(), p.flatten()):
-                if ti < cfg.num_classes and pi < cfg.num_classes:
-                    conf_mat[ti, pi] += 1
+        valid_targets = targets_np[valid]
+        valid_preds = preds[valid]
+
+        # 2. 过滤超出类别范围的像素
+        mask = (valid_targets < cfg.num_classes) & (valid_preds < cfg.num_classes)
+        valid_targets = valid_targets[mask]
+        valid_preds = valid_preds[mask]
+
+        # 3. 批量更新混淆矩阵
+        # np.add.at: 对每个(t, p)对，在conf_mat[t, p]位置+1
+        # 这是向量化操作，比Python for循环快100倍以上
+        np.add.at(conf_mat, (valid_targets, valid_preds), 1)
 
     # 计算mIoU
     iou_per_class = []
@@ -483,7 +510,7 @@ def evaluate(model, loader, cfg):
 
     # 像素准确率
     total = conf_mat.sum().item()
-    correct = conf_mat.diag().sum().item()
+    correct = conf_mat.diagonal().sum().item()
     pixel_acc = correct / max(total, 1)
 
     return miou, pixel_acc, iou_per_class
@@ -520,15 +547,20 @@ def train(model, train_loader, val_loader, cfg):
     patience_counter = 0
     best_model_state = None
 
+    # 混合精度GradScaler
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
     history = {"train_loss": [], "val_miou": [], "val_pixel_acc": []}
 
     print(f"\n{'='*60}")
     print("开始训练...")
     print(f"{'='*60}")
+    print(f"设备: {cfg.device} | 优化器: SGD(lr={cfg.learning_rate}) | AMP: {use_amp}")
 
     for epoch in range(1, cfg.epochs + 1):
         # 训练
-        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, cfg)
+        train_loss = train_one_epoch(model, train_loader, optimizer, criterion, cfg, scaler)
         # 验证
         miou, pixel_acc, _ = evaluate(model, val_loader, cfg)
 

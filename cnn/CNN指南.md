@@ -213,14 +213,14 @@ CNN防止过拟合的**核心手段**，相当于"免费"扩充数据：
 **目标**：判断整张图像属于哪个类别
 
 ```
-输入: 32×32彩色图 → CNN → 输出: [0.1, 0.8, 0.05, 0.05] → 预测: 汽车(类别1)
+输入: 28×28灰度图 → CNN → 输出: [0.1, 0.8, 0.05, 0.05] → 预测: 裤子(类别1)
                                   (10个类别的概率)             (取最大值)
 ```
 
 **输出层**：`num_classes` 个神经元，不加激活函数
 **损失函数**：`CrossEntropyLoss`（内含 Softmax）
 **评估指标**：准确率(Accuracy)、F1、混淆矩阵
-**本模板数据**：CIFAR-10 (60,000张 32×32 彩色图，10类)
+**本模板数据**：Fashion-MNIST (70,000张 28×28 灰度图，10类)
 
 ### 3.2 目标检测 (Object Detection)
 
@@ -260,7 +260,7 @@ CNN防止过拟合的**核心手段**，相当于"免费"扩充数据：
 **输出**：与输入同尺寸的类别图 (H, W)，每个像素一个类别
 **损失函数**：`CrossEntropyLoss`（像素级，`ignore_index=255`跳过边界）
 **评估指标**：mIoU(平均交并比)、像素准确率
-**本模板数据**：VOC 2012 (21类，含背景)
+**本模板数据**：合成分割数据 (5类，含背景)
 
 **与分类/检测的区别**：
 - 分类: 1张图 → 1个标签
@@ -288,7 +288,7 @@ CNN防止过拟合的**核心手段**，相当于"免费"扩充数据：
 **输出**：128维嵌入向量 → 余弦相似度
 **训练损失**：`CrossEntropyLoss`（分类训练，提取嵌入）
 **评估指标**：验证准确率、辨识Top-K准确率
-**本模板数据**：Olivetti Faces (40人×10张，64×64灰度图)
+**本模板数据**：合成人脸数据 (40人×10张，64×64灰度图)
 
 **与分类的区别**：
 - 分类: 只能识别训练过的N个人，新人需重新训练
@@ -351,16 +351,16 @@ cd py_ai_tech/
 # 激活虚拟环境
 source venv/bin/activate
 
-# 运行图像分类模板（CIFAR-10，60000张32×32彩色图，10类）
+# 运行图像分类模板（Fashion-MNIST，70000张28×28灰度图，10类）
 python cnn/classification.py
 
 # 运行目标检测模板（Faster R-CNN，COCO预训练推理演示）
 python cnn/detection.py
 
-# 运行图像分割模板（DeepLabV3，VOC 2012，21类）
+# 运行图像分割模板（DeepLabV3，合成分割数据，5类）
 python cnn/segmentation.py
 
-# 运行人脸识别模板（Olivetti Faces，40人×10张）
+# 运行人脸识别模板（合成人脸数据，40人×10张）
 python cnn/face_recognition.py
 ```
 
@@ -378,7 +378,7 @@ class CONFIG:
     in_channels = 3                    # RGB=3, 灰度=1
 
 # 2. 修改 get_dataloaders() 函数
-#    替换 datasets.CIFAR10 为你自己的 Dataset
+#    替换 datasets.FashionMNIST 为你自己的 Dataset
 #    torchvision.datasets.ImageFolder 可直接读取目录结构:
 #      data/my_dataset/
 #      ├── cat/    (猫的图片)
@@ -438,8 +438,8 @@ class CONFIG:
 ```python
 class CONFIG:
     # --- 数据相关 ---
-    image_size = 32               # 输入图像尺寸
-    in_channels = 3               # 输入通道数(RGB=3, 灰度=1)
+    image_size = 28               # 输入图像尺寸
+    in_channels = 1               # 输入通道数(灰度=1, RGB=3)
     test_size = 0.2               # 验证集比例
     random_state = 42             # 随机种子
 
@@ -460,6 +460,12 @@ class CONFIG:
 
     # --- 梯度裁剪 ---
     max_grad_norm = 5.0           # 梯度L2范数上限
+
+    # --- AMP混合精度 ---
+    use_amp = True                # 启用混合精度(仅GPU有效，速度↑1.5-2x)
+
+    # --- 数据加载优化 ---
+    num_workers = min(4, os.cpu_count() or 1)  # 多进程并行加载(0=主进程)
 
     # --- 数据增强 ---
     use_augmentation = True       # 是否使用数据增强
@@ -489,10 +495,10 @@ model.eval()
 # 图像分类：预处理 → softmax → argmax
 from PIL import Image
 from torchvision import transforms
-img = Image.open("test.jpg")
+img = Image.open("test.jpg").convert("L")  # 转为灰度图
 transform = transforms.Compose([
-    transforms.Resize(32), transforms.ToTensor(),
-    transforms.Normalize(mean=[0.4914,0.4822,0.4465], std=[0.2470,0.2435,0.2616]),
+    transforms.Resize(28), transforms.ToTensor(),
+    transforms.Normalize(mean=[0.2860], std=[0.3530]),  # Fashion-MNIST统计值
 ])
 tensor = transform(img).unsqueeze(0).to(device)
 with torch.no_grad():
@@ -535,8 +541,8 @@ with torch.no_grad():
 |--------|---------|---------|---------|---------|
 | **预测目标** | 整图类别 | 物体位置+类别 | 每个像素类别 | 人脸嵌入+相似度 |
 | **输出粒度** | 1个标签/图 | N个框+标签/图 | H×W标签/图 | 1个128维向量/脸 |
-| **数据集** | CIFAR-10(60K) | COCO(118K) | VOC 2012(2.9K) | Olivetti(400) |
-| **输入尺寸** | 32×32 | 800×1333 | 520×520 | 64×64 |
+| **数据集** | Fashion-MNIST(70K) | COCO(118K) | 合成数据 | 合成人脸(400) |
+| **输入尺寸** | 28×28 | 800×1333 | 128×128 | 64×64 |
 | **模型** | 自定义CNN | Faster R-CNN | DeepLabV3 | 嵌入网络 |
 | **Backbone** | 自定义(3层) | ResNet50+FPN | ResNet50 | 自定义(4层) |
 | **损失函数** | CrossEntropyLoss | 模型内置(4项) | CrossEntropyLoss(像素级) | CrossEntropyLoss(分类训练) |
@@ -556,9 +562,11 @@ with torch.no_grad():
 | **特殊组件** | AdaptiveAvgPool | RPN+ROI Pool | ASPP(多尺度空洞) | 嵌入层+分类头 |
 | **Dropout** | 0.5(FC层) | 无 | 无 | 0.5(嵌入层) |
 | **权重初始化** | He初始化 | 预训练权重 | 预训练权重 | He初始化 |
+| **AMP混合精度** | GradScaler+autocast | GradScaler+autocast | GradScaler+autocast | GradScaler+autocast |
+| **num_workers** | min(4,cpu) | — | min(4,cpu) | min(4,cpu) |
 
 **为什么分类和识别用自定义网络，检测和分割用预训练模型？**
-- 分类(32×32): 小图自定义CNN足够，从头训练收敛快
+- 分类(28×28): 小图自定义CNN足够，从头训练收敛快
 - 识别(64×64): 小数据集(400张)，预训练容易过拟合，自定义更可控
 - 检测/分割: 结构复杂(ResNet50+FPN/ASPP)，预训练权重提供通用特征，训练快10倍
 
@@ -574,12 +582,14 @@ with torch.no_grad():
 | **optimizer** | Adam | SGD | SGD | Adam | 分割/检测论文推荐SGD; 分类用Adam更稳 |
 | **scheduler** | Cosine | StepLR | Poly | ReduceLR | 分割用Poly; 检测用Step; 分类用Cosine |
 | **max_grad_norm** | 5.0 | 5.0 | 5.0 | 5.0 | CNN梯度比FNN大，5.0更宽松 |
-| **image_size** | 32 | 800 | 520 | 64 | 分类用小图; 检测/分割需大图保细节 |
+| **use_amp** | True | True | True | True | AMP混合精度(仅GPU有效，速度↑1.5-2x) |
+| **num_workers** | min(4,cpu) | — | min(4,cpu) | min(4,cpu) | 多进程数据加载(0=主进程) |
+| **image_size** | 28 | 800 | 128 | 64 | 分类用小图; 检测需大图保细节 |
 
 **为什么batch_size差异这么大？**
 - 检测(2): 800×1333分辨率，单张图约8MB显存，batch=2即16MB
-- 分割(4): 520×520分辨率，单张图约3MB显存
-- 分类(128): 32×32分辨率，单张图约3KB，128张≈400KB
+- 分割(4): 128×128分辨率，合成数据较小
+- 分类(128): 28×28灰度图，单张约0.8KB，128张≈100KB
 - 识别(32): 64×64灰度图，单张约4KB
 
 ### 6.4 损失函数对比
@@ -589,7 +599,7 @@ with torch.no_grad():
   输入: logits (batch, num_classes)
   内部: Softmax → -Σ y_i · log(p_i)
   特点: 所有类别概率和=1(互斥)
-  本模板: CIFAR-10均衡，不需要class_weight
+  本模板: Fashion-MNIST均衡，不需要class_weight
 
 检测 - 内置4项损失:
   1. RPN分类: 前景/背景二分类
@@ -616,7 +626,7 @@ with torch.no_grad():
 ```
 分类:
   图像 → RandomCrop(填充+裁剪) → RandomHFlip → ColorJitter
-       → ToTensor → Normalize(CIFAR均值/标准差)
+       → ToTensor → Normalize(Fashion-MNIST均值/标准差)
   标签: 整数(0-9)
   特殊: 训练增强/测试不增强; 标准化参数来自数据集统计
 
@@ -628,12 +638,12 @@ with torch.no_grad():
 分割:
   图像+标注 → RandomCrop(同步!) → RandomHFlip(同步!) → ToTensor → Normalize
   标注: (H, W) 每个像素类别索引，边界=255(忽略)
-  特殊: 图像和标注必须同步变换! 标注用NEAREST插值(不能双线性)
+  特殊: 图像和标注必须同步变换! 标注用NEAREST插值(不能双线性); 合成数据无需下载
 
 人脸识别:
   图像 → ToTensor → 归一化到[0,1]
   标签: 整数身份ID(0-39)
-  特殊: 人脸已预先裁剪对齐; 灰度图(1通道); 数据量小(400张)
+  特殊: 人脸已预先裁剪对齐; 灰度图(1通道); 合成数据(400张)
 ```
 
 ### 6.6 输出格式对比
@@ -699,10 +709,10 @@ FRR (False Reject Rate): 同一人被判为不同人的比例(拒识率)
 
 | 参数 | 分类 | 检测 | 分割 | 人脸识别 | 说明 |
 |------|------|------|------|---------|------|
-| `num_classes` | 10 | 81(含背景) | 21(含背景) | — | 类别数(检测/分割+1背景) |
+| `num_classes` | 10 | 81(含背景) | 5(含背景) | — | 类别数(检测/分割+1背景) |
 | `num_identities` | — | — | — | 40 | 身份数量(人脸识别) |
-| `image_size` | 32 | 800 | 520 | 64 | 输入图像尺寸 |
-| `in_channels` | 3 | 3 | 3 | 1 | 输入通道(RGB=3,灰度=1) |
+| `image_size` | 28 | 800 | 128 | 64 | 输入图像尺寸 |
+| `in_channels` | 1 | 3 | 3 | 1 | 输入通道(RGB=3,灰度=1) |
 | `conv_channels` | [32,64,128] | — | — | [32,64,128,256] | 卷积通道数 |
 | `embedding_dim` | — | — | — | 128 | 嵌入向量维度 |
 | `fc_dims` | [256] | — | — | — | 全连接层维度 |
@@ -715,6 +725,8 @@ FRR (False Reject Rate): 同一人被判为不同人的比例(拒识率)
 | `scheduler_type` | cosine | step | poly | reduce_lr | 调度器类型 |
 | `max_grad_norm` | 5.0 | 5.0 | 5.0 | 5.0 | 梯度裁剪阈值 |
 | `optimizer` | Adam | SGD | SGD | Adam | 优化器 |
+| `use_amp` | True | True | True | True | AMP混合精度(仅GPU有效) |
+| `num_workers` | min(4,cpu) | — | min(4,cpu) | min(4,cpu) | 数据加载进程数 |
 | `pretrained` | — | True | True | — | 是否用预训练 |
 | `use_augmentation` | True | — | True | — | 数据增强 |
 | `confidence_threshold` | — | 0.5 | — | — | 检测置信度阈值 |
@@ -727,32 +739,32 @@ FRR (False Reject Rate): 同一人被判为不同人的比例(拒识率)
 
 ```
 分类流程:
-  get_dataloaders: CIFAR-10 → 数据增强(训练)/标准化(测试)
-                  → stratify划分 → DataLoader
-  train:     CrossEntropyLoss → Adam → CosineAnnealingLR → 梯度裁剪 → 早停
-  evaluate:  argmax → Accuracy/F1/混淆矩阵
+  get_dataloaders: Fashion-MNIST → 数据增强(训练)/标准化(测试)
+                  → stratify划分 → DataLoader(num_workers, persistent_workers)
+  train:     CrossEntropyLoss → Adam → CosineAnnealingLR → AMP混合精度 → 梯度裁剪 → 早停
+  evaluate:  argmax → Accuracy/F1/混淆矩阵(AMP加速推理)
   predict:   softmax → argmax → 类别名 + 置信度
 
 检测流程:
-  get_model: 加载Faster R-CNN (COCO预训练/微调)
+  get_model: 加载Faster R-CNN (COCO预训练, weights=...COCO_V1)
   detect:    图像 → 模型推理 → 过滤低置信度 → NMS去重
-  finetune:  冻结backbone浅层 → SGD分层学习率 → StepLR
+  finetune:  冻结backbone浅层 → SGD分层学习率 → StepLR → AMP混合精度
   特殊:      模型内置损失(4项); collate_fn自定义; 推理/训练模式不同
 
 分割流程:
-  get_dataloaders: VOC → 同步变换(图像+标注) → DataLoader
-  train:     CrossEntropyLoss(ignore_index=255) → SGD → Poly调度 → 梯度裁剪 → 早停
-  evaluate:  argmax → 混淆矩阵 → mIoU/像素准确率
+  get_dataloaders: 合成分割数据 → 同步变换(图像+标注) → DataLoader(num_workers, persistent_workers)
+  train:     CrossEntropyLoss(ignore_index=255) → SGD → Poly调度 → AMP混合精度 → 梯度裁剪 → 早停
+  evaluate:  argmax → 向量化混淆矩阵(np.add.at) → mIoU/像素准确率
   predict:   模型输出 → argmax → 彩色可视化
-  特殊:      图像和标注同步变换; 标注用NEAREST插值; ASPP多尺度空洞卷积
+  特殊:      图像和标注同步变换; 标注用NEAREST插值; ASPP多尺度空洞卷积; 合成数据无需下载
 
 人脸识别流程:
-  load_data: Olivetti Faces → 划分训练/测试 → DataLoader
-  train:     CrossEntropyLoss → Adam → ReduceLROnPlateau → 梯度裁剪 → 早停
+  load_data: 合成人脸数据 → 划分训练/测试 → DataLoader(num_workers, persistent_workers)
+  train:     CrossEntropyLoss → Adam → ReduceLROnPlateau → AMP混合精度 → 梯度裁剪 → 早停
   evaluate:  分类准确率 + 嵌入可视化(t-SNE)
   verify:    嵌入提取 → 余弦相似度 → 阈值判断(同一人/不同人)
-  identify:  嵌入提取 → 与人脸库比较 → Top-K最相似
-  特殊:      训练用分类头,推理只用嵌入层; 人脸库注册/搜索机制
+  identify:  嵌入提取 → 与人脸库比较(批量DataLoader) → Top-K最相似
+  特殊:      训练用分类头,推理只用嵌入层; 人脸库注册/搜索机制; 合成数据无需下载
 ```
 
 ---
@@ -825,8 +837,8 @@ accumulation_steps = 4
 # 每4个batch才更新一次参数，等效batch_size×4
 
 # 4. 使用混合精度训练
-scaler = torch.cuda.amp.GradScaler()
-with torch.cuda.amp.autocast():
+scaler = torch.amp.GradScaler("cuda")
+with torch.amp.autocast("cuda"):
     output = model(input)
     loss = criterion(output, target)
 scaler.scale(loss).backward()
@@ -862,9 +874,10 @@ ResNet50  →  ResNet18  →  MobileNetV3
 | 图像尺寸 | 数据量 | 推荐 conv_channels | 本项目实际使用 |
 |---------|--------|-------------------|---------------|
 | 28×28 | <10K | [16, 32] | — |
-| 32×32 | 10K-100K | [32, 64, 128] | 分类[32,64,128] |
+| 28×28 | 10K-100K | [32, 64, 128] | 分类[32,64,128] |
 | 64×64 | <1K | [32, 64, 128, 256] | 人脸[32,64,128,256] |
-| 224×224+ | >100K | ResNet18/34/50 | 检测/分割(ResNet50) |
+| 128×128 | <1K | [32, 64, 128, 256] | 分割(ResNet50预训练) |
+| 224×224+ | >100K | ResNet18/34/50 | 检测(ResNet50) |
 
 > 经验：小图用自定义CNN，大图用预训练ResNet；通道数逐层加倍
 
@@ -931,13 +944,13 @@ class ResidualBlock(nn.Module):
 
 ```python
 # 方法1: 特征提取(冻结backbone)
-model = torchvision.models.resnet50(pretrained=True)
+model = torchvision.models.resnet50(weights="IMAGENET1K_V1")
 for param in model.parameters():
     param.requires_grad = False  # 冻结所有参数
 model.fc = nn.Linear(2048, num_classes)  # 只训练新分类头
 
 # 方法2: 微调(分层学习率)
-model = torchvision.models.resnet50(pretrained=True)
+model = torchvision.models.resnet50(weights="IMAGENET1K_V1")
 model.fc = nn.Linear(2048, num_classes)
 optimizer = optim.SGD([
     {"params": model.conv1.parameters(), "lr": 1e-4},    # 浅层: 小LR
@@ -1004,8 +1017,8 @@ train_loader = DataLoader(..., pin_memory=True)
 train_loader = DataLoader(..., num_workers=4)
 
 # 4. 混合精度训练(显存减半，速度翻倍)
-scaler = torch.cuda.amp.GradScaler()
-with torch.cuda.amp.autocast():
+scaler = torch.amp.GradScaler("cuda")
+with torch.amp.autocast("cuda"):
     output = model(input)
 
 # 5. 梯度累积(等效更大batch_size)
@@ -1034,19 +1047,13 @@ if torch.cuda.is_available():
 
 ```
 cnn/
-├── classification.py      # 图像分类模板(CIFAR-10, 自定义CNN)
+├── classification.py      # 图像分类模板(Fashion-MNIST, 自定义CNN)
 ├── detection.py           # 目标检测模板(Faster R-CNN, COCO预训练)
-├── segmentation.py        # 图像分割模板(DeepLabV3, VOC 2012)
-├── face_recognition.py    # 人脸识别模板(Olivetti Faces, 嵌入网络)
+├── segmentation.py        # 图像分割模板(DeepLabV3, 合成分割数据)
+├── face_recognition.py    # 人脸识别模板(合成人脸数据, 嵌入网络)
 └── CNN指南.md             # 本文档
-
-data/                      # 数据集(自动下载)
-├── cifar-10-batches-py/   # CIFAR-10 分类数据集
-├── VOCdevkit/             # VOC 2012 分割数据集
-├── olivetti_faces/        # Olivetti Faces 人脸数据集
-└── ...
 ```
 
 ---
 
-> 💡 **提示**：四个模板文件均使用公开数据集(自动下载)。分类和人脸识别使用自定义CNN(从头训练)，检测和分割使用预训练模型(推理/微调)。所有可调参数集中在 `CONFIG` 类中，方便统一管理和实验对比。替换为自己的数据时，修改 `CONFIG` 和数据加载函数即可。
+> 💡 **提示**：四个模板文件中，分类使用公开数据集(Fashion-MNIST自动下载)，检测使用COCO预训练模型，分割和人脸识别使用合成数据(无需下载)。分类和人脸识别使用自定义CNN(从头训练)，检测和分割使用预训练模型(推理/微调)。所有模板均支持AMP混合精度训练(仅GPU有效)。所有可调参数集中在 `CONFIG` 类中，方便统一管理和实验对比。替换为自己的数据时，修改 `CONFIG` 和数据加载函数即可。

@@ -152,6 +152,17 @@ class CONFIG:
     # --- 梯度裁剪 ---
     max_grad_norm = 5.0
 
+    # --- 混合精度训练(AMP) ---
+    # use_amp=True: 启用自动混合精度，训练速度提升1.5-2倍
+    #   仅CUDA(GPU)有效，CPU自动降级为普通训练
+    #   原理: 自动将部分float32运算转为float16，加快速度、减少显存
+    use_amp = True
+
+    # --- 数据加载优化 ---
+    # num_workers: 多进程并行加载数据
+    #   0=主进程加载(慢)，2-4=推荐值
+    num_workers = min(4, os.cpu_count() or 1)
+
     # --- 识别相关 ---
     # similarity_threshold=0.5: 余弦相似度阈值
     #   > 0.5: 同一人；<= 0.5: 不同人
@@ -338,11 +349,14 @@ def load_data(cfg):
     test_dataset = FaceDataset(test_img, test_lbl)
 
     pin_mem = cfg.device.type == "cuda"
+    pw = cfg.num_workers > 0
     train_loader = DataLoader(
         train_dataset, batch_size=cfg.batch_size, shuffle=True, pin_memory=pin_mem,
+        num_workers=cfg.num_workers, persistent_workers=pw,
     )
     test_loader = DataLoader(
         test_dataset, batch_size=cfg.batch_size, shuffle=False, pin_memory=pin_mem,
+        num_workers=cfg.num_workers, persistent_workers=pw,
     )
 
     print(f"训练集: {len(train_dataset)}张 | 测试集: {len(test_dataset)}张")
@@ -481,26 +495,35 @@ class FaceEmbeddingNet(nn.Module):
 # ============================================================
 # Step 5: 训练函数
 # ============================================================
-def train_one_epoch(model, loader, optimizer, criterion, cfg):
+def train_one_epoch(model, loader, optimizer, criterion, cfg, scaler=None):
     """训练一个epoch。"""
     model.train()
     total_loss = 0
     correct = 0
     total = 0
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
 
     for images, labels in loader:
         images = images.to(cfg.device)
         labels = labels.to(cfg.device)
 
-        # 前向传播: 返回(logits, embedding)
-        logits, _ = model(images)
-        loss = criterion(logits, labels)
+        # 前向传播(混合精度)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            logits, _ = model(images)
+            loss = criterion(logits, labels)
 
         # 反向传播
         optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
-        optimizer.step()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+            optimizer.step()
 
         # 统计
         total_loss += loss.item() * images.size(0)
@@ -519,13 +542,15 @@ def evaluate(model, loader, criterion, cfg):
     all_preds = []
     all_labels = []
     all_embeddings = []
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
 
     for images, labels in loader:
         images = images.to(cfg.device)
         labels_t = labels.to(cfg.device)
 
-        logits, embeddings = model(images)
-        loss = criterion(logits, labels_t)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            logits, embeddings = model(images)
+            loss = criterion(logits, labels_t)
 
         total_loss += loss.item() * images.size(0)
         _, preds = logits.max(1)
@@ -557,12 +582,17 @@ def train(model, train_loader, val_loader, cfg):
     best_model_state = None
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
 
+    # 混合精度GradScaler
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
     print(f"\n{'='*60}")
     print("开始训练...")
     print(f"{'='*60}")
+    print(f"设备: {cfg.device} | 优化器: Adam(lr={cfg.learning_rate}) | AMP: {use_amp}")
 
     for epoch in range(1, cfg.epochs + 1):
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, cfg)
+        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, cfg, scaler)
         val_loss, val_acc, _, _, _ = evaluate(model, val_loader, criterion, cfg)
 
         history["train_loss"].append(train_loss)
@@ -674,17 +704,28 @@ def build_gallery(model, dataset, cfg):
     人脸库 = {(人名, 嵌入向量), ...}
     - 注册: 每个人提供1~N张照片，提取嵌入向量存入库中
     - 识别: 查询照片与库中所有嵌入比较，返回最相似的
+
+    【批量处理优化】
+    原始方法: 逐张图片调用model，每次只处理1张 → GPU利用率低
+    批量方法: 将图片打包成batch，一次处理多张 → GPU利用率高，速度快5-10倍
     """
     model.eval()
+    # 批量处理: 用DataLoader自动打包batch
+    gallery_loader = DataLoader(
+        dataset, batch_size=cfg.batch_size, shuffle=False,
+        num_workers=0, pin_memory=cfg.device.type == "cuda",
+    )
     all_embeddings = []
     all_labels = []
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
 
-    for i in range(len(dataset)):
-        img, label = dataset[i]
-        img = img.unsqueeze(0).to(cfg.device)  # (1, 1, 64, 64)
-        emb = model.get_embedding(img)
-        all_embeddings.append(emb.cpu())
-        all_labels.append(label)
+    with torch.no_grad():
+        for images, labels in gallery_loader:
+            images = images.to(cfg.device)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                embs = model.get_embedding(images)
+            all_embeddings.append(embs.cpu())
+            all_labels.extend(labels.numpy() if isinstance(labels, torch.Tensor) else labels)
 
     gallery_embeddings = torch.cat(all_embeddings, dim=0)
     gallery_labels = np.array(all_labels)
@@ -749,7 +790,7 @@ def plot_face_samples(dataset, cfg, num_per_person=5, num_persons=4):
         if shown >= num_persons:
             break
 
-    plt.suptitle("Olivetti Faces 样本", fontsize=14, fontweight="bold")
+    plt.suptitle("合成人脸数据样本", fontsize=14, fontweight="bold")
     plt.tight_layout()
     save_path = os.path.join(cfg.save_dir, "face_samples.png")
     plt.savefig(save_path, dpi=150, bbox_inches="tight")

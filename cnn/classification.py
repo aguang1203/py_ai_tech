@@ -19,7 +19,7 @@ CNN 图像分类任务模板 (Convolutional Neural Network for Image Classificat
 
 【应用场景】
 - 手写数字识别 (MNIST, 10类)
-- 自然图像分类 (CIFAR-10/ImageNet, 本模板使用CIFAR-10)
+- 自然图像分类 (Fashion-MNIST, 本模板使用Fashion-MNIST)
 - 医学影像分类 (X光/CT/病理切片)
 - 商品分类 (电商/零售)
 - 动植物识别
@@ -29,6 +29,7 @@ CNN 图像分类任务模板 (Convolutional Neural Network for Image Classificat
 - 70,000张 28×28 灰度图像 (训练60,000 + 测试10,000)
 - 特点: MNIST的现代替代品，比CIFAR-10更小(30MB vs 170MB)，下载更快更稳定
 - 相比CIFAR-10: 灰度图(1通道 vs 3通道)，尺寸更小(28 vs 32)，但分类难度适中
+  本模板使用Fashion-MNIST(灰度28×28，10类)而非CIFAR-10
 
 【使用方法】
 1. 修改 CONFIG 部分的超参数
@@ -73,7 +74,7 @@ class CONFIG:
 
     # --- 数据相关 ---
     # data_dir: 数据集存放目录
-    #   torchvision会自动下载CIFAR-10到此目录
+    #   torchvision会自动下载Fashion-MNIST到此目录
     #   如果已有数据，直接指向数据目录即可
     data_dir = "data"
 
@@ -98,7 +99,7 @@ class CONFIG:
     in_channels = 1
 
     # test_size=0.2: 验证集比例(从训练集中划出)
-    #   CIFAR-10训练集50000张，划出20%=10000张作为验证集
+    #   Fashion-MNIST训练集60000张，划出20%=12000张作为验证集
     test_size = 0.2
 
     # random_state=42: 固定随机种子，确保每次运行结果可复现
@@ -108,8 +109,8 @@ class CONFIG:
     # conv_channels: 各卷积块的输出通道数
     #   [32, 64, 128]: 逐层加倍，提取越来越丰富的特征
     #   为什么逐层加倍？浅层提取简单特征(边缘)需要少通道，深层提取复杂特征(对象)需要多通道
-    #   为什么不是[16, 32, 64]？CIFAR-10虽小但颜色复杂，太少通道欠拟合
-    #   为什么不是[64, 128, 256]？32x32小图，太多通道容易过拟合+浪费计算
+    #   为什么不是[16, 32, 64]？Fashion-MNIST虽小但模式复杂，太少通道欠拟合
+    #   为什么不是[64, 128, 256]？28x28小图，太多通道容易过拟合+浪费计算
     conv_channels = [32, 64, 128]
 
     # fc_dims: 全连接层维度
@@ -125,7 +126,7 @@ class CONFIG:
 
     # --- 训练相关 ---
     # batch_size=128: 每次梯度更新使用128张图
-    #   为什么128？CIFAR-10图小(32x32x3≈3KB)，128张≈384KB，GPU轻松处理
+    #   为什么128？Fashion-MNIST图小(28x28x1≈0.8KB)，128张≈100KB，GPU轻松处理
     #   较大batch_size训练更稳定，梯度估计更准确
     batch_size = 128
 
@@ -136,7 +137,7 @@ class CONFIG:
 
     # epochs=50: 最大训练轮数
     #   早停会自动控制，50是上限
-    #   CIFAR-10小图+自定义CNN，通常20-30轮收敛
+    #   Fashion-MNIST+自定义CNN，通常20-30轮收敛
     epochs = 50
 
     # weight_decay=5e-4: L2正则化强度
@@ -184,6 +185,25 @@ class CONFIG:
     #   注意：数字/文字识别不适合翻转(6和9会混淆)
     #   Fashion-MNIST: 衣服翻转还是衣服，所以可以翻转
     random_hflip_prob = 0.5
+
+    # --- 混合精度训练(AMP) ---
+    # use_amp=True: 启用自动混合精度(Automatic Mixed Precision)
+    #   【什么是混合精度？】
+    #   传统训练用float32(32位浮点数)，AMP自动将部分运算转为float16(16位)
+    #   float16计算速度更快、显存占用更少，但精度略低
+    #   AMP智能选择哪些运算用float16(如矩阵乘法)，哪些保持float32(如损失计算)
+    #   【效果】训练速度提升1.5-2倍，显存减少30-50%，精度几乎不变
+    #   【为什么初学者也能用？】PyTorch的AMP是全自动的，不需要手动管理精度
+    #   仅在CUDA(GPU)上有效，CPU会自动降级为普通训练
+    use_amp = True
+
+    # --- 数据加载优化 ---
+    # num_workers: DataLoader的子进程数
+    #   0: 主进程加载(慢，但兼容性最好)
+    #   2-4: 多进程并行加载(快，推荐值)
+    #   太多(>8): 进程切换开销大，反而变慢
+    #   这里根据CPU核心数自动选择，但不超过4
+    num_workers = min(4, os.cpu_count() or 1)
 
     # --- 保存相关 ---
     # save_dir: 模型和图表保存目录
@@ -267,7 +287,7 @@ def get_dataloaders(cfg):
       仅在GPU训练时有效，CPU训练时可设False
 
     【为什么换用Fashion-MNIST？】
-    - CIFAR-10约170MB，下载慢且经常超时
+    - 使用Fashion-MNIST: 仅30MB，下载快，不会超时
     - Fashion-MNIST仅30MB，下载快速稳定
     - 同样是10类分类任务，难度适中，更适合入门学习
     - MNIST的替代品：数字太简单(99%+准确率)，衣服更有挑战性
@@ -309,18 +329,25 @@ def get_dataloaders(cfg):
 
     # 创建DataLoader
     pin_mem = cfg.device.type == "cuda"
+    # persistent_workers=True: 保持数据加载进程活跃，不每轮重建
+    #   为什么？每次启动子进程需要时间，保持活跃可加速后续epoch
+    #   仅在num_workers>0时有效
+    pw = cfg.num_workers > 0
 
     train_loader = DataLoader(
         train_subset, batch_size=cfg.batch_size, shuffle=True,
-        num_workers=2, pin_memory=pin_mem,
+        num_workers=cfg.num_workers, pin_memory=pin_mem,
+        persistent_workers=pw,
     )
     val_loader = DataLoader(
         val_subset, batch_size=cfg.batch_size, shuffle=False,
-        num_workers=2, pin_memory=pin_mem,
+        num_workers=cfg.num_workers, pin_memory=pin_mem,
+        persistent_workers=pw,
     )
     test_loader = DataLoader(
         test_dataset, batch_size=cfg.batch_size, shuffle=False,
-        num_workers=2, pin_memory=pin_mem,
+        num_workers=cfg.num_workers, pin_memory=pin_mem,
+        persistent_workers=pw,
     )
 
     print(f"训练集: {n_train}张 | 验证集: {n_val}张 | 测试集: {len(test_dataset)}张")
@@ -375,13 +402,18 @@ class CNNClassifier(nn.Module):
     CNN图像分类模型
 
     【架构设计思路】
-    输入 (3, 32, 32)
-      → ConvBlock1(3→32) + ConvBlock1b(32→32) + MaxPool → (32, 16, 16)
-      → ConvBlock2(32→64) + ConvBlock2b(64→64) + MaxPool → (64, 8, 8)
-      → ConvBlock3(64→128) + ConvBlock3b(128→128) + MaxPool → (128, 4, 4)
+    输入 (1, 28, 28)   ← Fashion-MNIST: 灰度图, 28×28像素
+      → ConvBlock1(1→32) + ConvBlock1b(32→32) + MaxPool → (32, 14, 14)
+      → ConvBlock2(32→64) + ConvBlock2b(64→64) + MaxPool → (64, 7, 7)
+      → ConvBlock3(64→128) + ConvBlock3b(128→128) + MaxPool → (128, 3, 3)
       → AdaptiveAvgPool → (128, 1, 1)
       → Flatten → 128
       → FC(128→256) → BN → ReLU → Dropout → FC(256→10)
+
+    【维度变化详解】
+    输入 28×28 → MaxPool(÷2) → 14×14 → MaxPool(÷2) → 7×7 → MaxPool(÷2) → 3×3
+    为什么7÷2=3不是4？MaxPool2d做向下取整: floor(7/2)=3
+    为什么用AdaptiveAvgPool？不管最终特征图是3×3还是4×4，都压缩到1×1
 
     【为什么每个阶段用2个卷积层？】
     VGG的核心理念：用多个小卷积(3×3)代替大卷积(7×7)
@@ -405,20 +437,20 @@ class CNNClassifier(nn.Module):
         # 每个stage: 2个ConvBlock + 1个MaxPool
         # 2个ConvBlock保证足够的特征提取深度
         self.features = nn.Sequential(
-            # Stage 1: 输入(3,32,32) → 输出(32,16,16)
-            ConvBlock(in_ch, c[0]),       # 3→32
+            # Stage 1: 输入(1,28,28) → 输出(32,14,14)
+            ConvBlock(in_ch, c[0]),       # 1→32 (灰度图只有1通道)
             ConvBlock(c[0], c[0]),         # 32→32，同通道卷积，精炼特征
-            nn.MaxPool2d(2, 2),           # 32×32 → 16×16，空间降采样
+            nn.MaxPool2d(2, 2),           # 28×28 → 14×14，空间降采样
 
-            # Stage 2: 输入(32,16,16) → 输出(64,8,8)
+            # Stage 2: 输入(32,14,14) → 输出(64,7,7)
             ConvBlock(c[0], c[1]),         # 32→64，通道加倍
             ConvBlock(c[1], c[1]),         # 64→64
-            nn.MaxPool2d(2, 2),           # 16×16 → 8×8
+            nn.MaxPool2d(2, 2),           # 14×14 → 7×7
 
-            # Stage 3: 输入(64,8,8) → 输出(128,4,4)
+            # Stage 3: 输入(64,7,7) → 输出(128,3,3)
             ConvBlock(c[1], c[2]),         # 64→128
             ConvBlock(c[2], c[2]),         # 128→128
-            nn.MaxPool2d(2, 2),           # 8×8 → 4×4
+            nn.MaxPool2d(2, 2),           # 7×7 → 3×3 (floor(7/2)=3)
         )
 
         # 全局平均池化
@@ -467,8 +499,8 @@ class CNNClassifier(nn.Module):
         前向传播
 
         数据流动:
-        x: (batch, 3, 32, 32)
-          → features: (batch, 128, 4, 4)
+        x: (batch, 1, 28, 28)   ← Fashion-MNIST灰度图
+          → features: (batch, 128, 3, 3)
           → avgpool: (batch, 128, 1, 1)
           → flatten: (batch, 128)
           → classifier: (batch, 10)  ← logits(未激活)
@@ -483,7 +515,7 @@ class CNNClassifier(nn.Module):
 # ============================================================
 # Step 5: 训练函数
 # ============================================================
-def train_one_epoch(model, loader, optimizer, criterion, cfg):
+def train_one_epoch(model, loader, optimizer, criterion, cfg, scaler=None):
     """
     训练一个epoch。
 
@@ -491,30 +523,45 @@ def train_one_epoch(model, loader, optimizer, criterion, cfg):
     1. model.train(): 启用BN和Dropout(训练模式)
     2. 梯度裁剪: 防止梯度爆炸(CNN尤其重要)
     3. 数据类型: 输入是4D张量 (batch, channel, height, width)
+    4. 混合精度: 用autocast自动选择float16/float32，加速训练
     """
     model.train()
     total_loss = 0
     correct = 0
     total = 0
 
+    # 判断是否启用混合精度(仅CUDA有效)
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
+
     for inputs, targets in loader:
         inputs, targets = inputs.to(cfg.device), targets.to(cfg.device)
 
-        # 前向传播
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
+        # 前向传播(混合精度)
+        # 【autocast做了什么？】
+        # 自动将矩阵乘法、卷积等大运算转为float16(快)
+        # 而损失计算、归一化等精度敏感操作保持float32(准)
+        # 就像"该快的地方快，该准的地方准"，不需要手动指定
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
 
         # 反向传播
         optimizer.zero_grad()
-        loss.backward()
-
-        # 梯度裁剪: 防止梯度爆炸
-        # 【为什么CNN需要梯度裁剪？】
-        # CNN的梯度通过卷积核反向传播时会聚合，可能出现梯度爆炸
-        # 限制梯度范数≤5.0，超过则等比缩放
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
-
-        optimizer.step()
+        # 【GradScaler做了什么？】
+        # float16的梯度值很小，直接用可能下溢(变成0)
+        # Scaler先放大loss再反向传播，防止梯度消失
+        # 然后再缩放回来更新参数
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            # 梯度裁剪: 先unscale再裁剪，否则裁剪阈值不对
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+            optimizer.step()
 
         # 统计
         total_loss += loss.item() * inputs.size(0)
@@ -541,11 +588,14 @@ def evaluate(model, loader, criterion, cfg):
     total_loss = 0
     all_preds = []
     all_targets = []
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
 
     for inputs, targets in loader:
         inputs, targets = inputs.to(cfg.device), targets.to(cfg.device)
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
+        # 推理时也用autocast加速，不影响精度
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
 
         total_loss += loss.item() * inputs.size(0)
         _, preds = outputs.max(1)
@@ -572,7 +622,7 @@ def train(model, train_loader, val_loader, cfg):
     """
     # 损失函数
     # CrossEntropyLoss: 内含Softmax，模型输出logits即可
-    # 为什么不需要class_weight? CIFAR-10每类5000张，完全均衡
+    # 为什么不需要class_weight? Fashion-MNIST每类6000张(训练集)，完全均衡
     criterion = nn.CrossEntropyLoss()
 
     # 优化器
@@ -601,14 +651,21 @@ def train(model, train_loader, val_loader, cfg):
     # 记录训练曲线
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
 
+    # 混合精度训练的GradScaler
+    # 【为什么需要Scaler？】
+    # float16的数值范围小(最小约6e-8)，小梯度会变成0(下溢)
+    # Scaler通过放大loss来放大梯度，防止下溢，再缩放回来更新参数
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
     print(f"\n{'='*60}")
     print("开始训练...")
     print(f"{'='*60}")
-    print(f"设备: {cfg.device} | 优化器: Adam(lr={cfg.learning_rate}) | 调度器: {cfg.scheduler_type}")
+    print(f"设备: {cfg.device} | 优化器: Adam(lr={cfg.learning_rate}) | 调度器: {cfg.scheduler_type} | AMP: {use_amp}")
 
     for epoch in range(1, cfg.epochs + 1):
         # 训练
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, cfg)
+        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, cfg, scaler)
         # 验证
         val_loss, val_acc, _, _ = evaluate(model, val_loader, criterion, cfg)
 

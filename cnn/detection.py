@@ -161,6 +161,12 @@ class CONFIG:
     # weight_decay=5e-4: L2正则化
     weight_decay = 5e-4
 
+    # --- 混合精度训练(AMP) ---
+    # use_amp=True: 启用自动混合精度，训练速度提升1.5-2倍
+    #   仅CUDA(GPU)有效，CPU自动降级为普通训练
+    #   原理: 自动将部分float32运算转为float16，加快速度、减少显存
+    use_amp = True
+
     # --- 保存相关 ---
     save_dir = "cnn/output/detection"
 
@@ -437,7 +443,7 @@ def create_demo_image():
 # ============================================================
 # Step 6: 训练函数(微调时使用)
 # ============================================================
-def train_one_epoch(model, optimizer, data_loader, cfg):
+def train_one_epoch(model, optimizer, data_loader, cfg, scaler=None):
     """
     训练一个epoch(微调)。
 
@@ -449,27 +455,30 @@ def train_one_epoch(model, optimizer, data_loader, cfg):
     """
     model.train()
     total_loss = 0
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
 
     for i, (images, targets) in enumerate(data_loader):
         # 将数据移到设备
         images = [img.to(cfg.device) for img in images]
         targets = [{k: v.to(cfg.device) for k, v in t.items()} for t in targets]
 
-        # 前向传播
-        # 检测模型训练时返回loss字典
-        loss_dict = model(images, targets)
-
-        # 总损失 = 分类损失 + 回归损失(RPN + ROI)
-        losses = sum(loss for loss in loss_dict.values())
+        # 前向传播(混合精度)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            loss_dict = model(images, targets)
+            losses = sum(loss for loss in loss_dict.values())
 
         # 反向传播
         optimizer.zero_grad()
-        losses.backward()
-
-        # 梯度裁剪
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-
-        optimizer.step()
+        if scaler is not None:
+            scaler.scale(losses).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            losses.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
 
         total_loss += losses.item()
 
@@ -508,9 +517,13 @@ def finetune(model, train_loader, cfg):
     optimizer = optim.SGD(params, momentum=0.9, weight_decay=cfg.weight_decay)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
-    print(f"\n微调开始 (共{cfg.epochs}轮)...")
+    # 混合精度GradScaler
+    use_amp = cfg.use_amp and cfg.device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+    print(f"\n微调开始 (共{cfg.epochs}轮, AMP: {use_amp})...")
     for epoch in range(cfg.epochs):
-        avg_loss = train_one_epoch(model, optimizer, train_loader, cfg)
+        avg_loss = train_one_epoch(model, optimizer, train_loader, cfg, scaler)
         scheduler.step()
         print(f"Epoch {epoch+1}/{cfg.epochs} | Avg Loss: {avg_loss:.4f}")
 
