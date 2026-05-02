@@ -438,7 +438,7 @@ def main():
     print("=" * 60)
     
     train_losses, train_accs = [], []
-    test_losses, test_accs = []
+    test_losses, test_accs = [], []
     
     for epoch in range(1, EPOCHS + 1):
         train_loss, train_acc = train(model, train_loader, optimizer, criterion, epoch)
